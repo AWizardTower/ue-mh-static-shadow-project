@@ -18,6 +18,12 @@ class SHADOW_API AMHShadowBakeVolume : public AActor
 public:
 	AMHShadowBakeVolume();
 
+	virtual void Tick(float DeltaSeconds) override;
+
+#if WITH_EDITOR
+	virtual bool ShouldTickIfViewportsOnly() const override;
+#endif
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	TObjectPtr<UBoxComponent> BoundsComponent;
 
@@ -42,5 +48,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow")
 	FString DefaultOutputAssetPath = TEXT("/Game/MHShadow/Baked/MHShadowData");
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow|Debug")
+	bool bDrawDebugBakeRays = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow|Debug", meta = (ClampMin = "2", UIMin = "4", UIMax = "32"))
+	int32 DebugRayGridCount = 9;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow|Debug")
+	bool bDebugTraceComplex = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow|Debug")
+	bool bDebugDrawOnlyWhenSelected = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow|Debug", meta = (ClampMin = "0.0"))
+	float DebugLineThickness = 0.8f;
+
 	FBox GetBakeBounds() const;
+
+private:
+	void DrawDebugBakeRays() const;
 };
