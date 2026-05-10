@@ -14,6 +14,12 @@ class SHADOW_API UMHShadowDataAsset : public UDataAsset
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	EMHShadowBakeSource BakeSource = EMHShadowBakeSource::CpuTraceDual;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	EMHShadowProjectionMapping ProjectionMapping = EMHShadowProjectionMapping::BasisRectDepth;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	FIntPoint Resolution = FIntPoint(0, 0);
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
@@ -46,8 +52,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	float MaxLightDepth = 0.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Lightmass")
+	FVector4 WorldToShadowRow0 = FVector4(1, 0, 0, 0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Lightmass")
+	FVector4 WorldToShadowRow1 = FVector4(0, 1, 0, 0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Lightmass")
+	FVector4 WorldToShadowRow2 = FVector4(0, 0, 1, 0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Lightmass")
+	FVector4 WorldToShadowRow3 = FVector4(0, 0, 0, 1);
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Debug")
 	TArray<FMHShadowDepthInterval> RawIntervals;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Debug")
+	TArray<uint8> RawIntervalFlags;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	TArray<FMHShadowDepthInterval> Intervals;

@@ -5,6 +5,21 @@
 #include "CoreMinimal.h"
 #include "MHShadowTypes.generated.h"
 
+UENUM(BlueprintType)
+enum class EMHShadowBakeSource : uint8
+{
+	CpuTraceDual,
+	LightmassStaticDepth,
+	LightmassDual,
+};
+
+UENUM(BlueprintType)
+enum class EMHShadowProjectionMapping : uint8
+{
+	BasisRectDepth,
+	LightmassWorldToShadowMatrix,
+};
+
 USTRUCT(BlueprintType)
 struct FMHShadowDepthInterval
 {

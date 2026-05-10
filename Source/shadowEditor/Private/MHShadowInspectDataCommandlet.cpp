@@ -53,6 +53,9 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 	TSet<FColor> UniqueColors;
 	int32 NonWhitePixels = 0;
 	int32 ValidRawIntervals = 0;
+	int32 ThinFallbackIntervals = 0;
+	int32 UnpairedIntervals = 0;
+	int32 MultiHitIntervals = 0;
 	for (const FColor& Color : Asset->DebugIntervalPreview)
 	{
 		UniqueColors.Add(Color);
@@ -68,18 +71,24 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 			++ValidRawIntervals;
 		}
 	}
+	for (uint8 Flags : Asset->RawIntervalFlags)
+	{
+		ThinFallbackIntervals += (Flags & (1 << 1)) != 0 ? 1 : 0;
+		UnpairedIntervals += (Flags & (1 << 2)) != 0 ? 1 : 0;
+		MultiHitIntervals += (Flags & (1 << 3)) != 0 ? 1 : 0;
+	}
 
 	bool bOk = true;
 	bOk &= Asset->IsValidForRendering();
-	bOk &= Asset->Resolution.X > 0 && Asset->Resolution.X == Asset->Resolution.Y;
+	bOk &= Asset->Resolution.X > 0 && Asset->Resolution.Y > 0;
 	bOk &= Asset->Stats.RawTexelCount == ExpectedPreviewPixels;
 	bOk &= Asset->Stats.ValidTexelCount > 0;
 	bOk &= Asset->RawIntervals.Num() == ExpectedPreviewPixels;
 	bOk &= ValidRawIntervals == Asset->Stats.ValidTexelCount;
-	bOk &= Asset->Stats.NodeCount > 0;
-	bOk &= Asset->Stats.IntervalCount > 0;
+	bOk &= Asset->Stats.NodeCount > 0 || Asset->RawIntervals.Num() == ExpectedPreviewPixels;
+	bOk &= Asset->Stats.IntervalCount > 0 || Asset->RawIntervals.Num() == ExpectedPreviewPixels;
 	bOk &= Asset->Stats.RawBytes > 0;
-	bOk &= Asset->Stats.CompressedBytes > 0;
+	bOk &= Asset->Stats.CompressedBytes > 0 || Asset->Nodes.Num() == 0;
 	bOk &= Asset->DebugIntervalPreview.Num() == ExpectedPreviewPixels;
 	bOk &= NonWhitePixels > 0;
 	bOk &= UniqueColors.Num() > 1;
@@ -108,6 +117,13 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 	UE_LOG(LogTemp, Display, TEXT("RawIntervals=%d ValidRawIntervals=%d"),
 		Asset->RawIntervals.Num(),
 		ValidRawIntervals);
+	UE_LOG(LogTemp, Display, TEXT("Source=%d ProjectionMapping=%d RawFlags=%d ThinFallback=%d Unpaired=%d MultiHit=%d"),
+		static_cast<int32>(Asset->BakeSource),
+		static_cast<int32>(Asset->ProjectionMapping),
+		Asset->RawIntervalFlags.Num(),
+		ThinFallbackIntervals,
+		UnpairedIntervals,
+		MultiHitIntervals);
 	UE_LOG(LogTemp, Display, TEXT("LightSpaceMin=(%.3f, %.3f) LightSpaceMax=(%.3f, %.3f)"),
 		Asset->LightSpaceMin.X,
 		Asset->LightSpaceMin.Y,

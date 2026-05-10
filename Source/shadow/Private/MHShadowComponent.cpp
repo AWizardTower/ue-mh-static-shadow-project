@@ -73,6 +73,7 @@ void UMHShadowComponent::RegisterShadowData()
 	RenderData.Resolution = ShadowData->Resolution;
 	RenderData.TileSize = ShadowData->TileSize;
 	RenderData.DepthBias = ShadowData->DepthBias;
+	RenderData.ProjectionMapping = ShadowData->ProjectionMapping == EMHShadowProjectionMapping::LightmassWorldToShadowMatrix ? 1u : 0u;
 	RenderData.LightOrigin = FVector3f(ShadowData->LightOrigin);
 	RenderData.LightXAxis = FVector3f(ShadowData->LightXAxis.GetSafeNormal());
 	RenderData.LightYAxis = FVector3f(ShadowData->LightYAxis.GetSafeNormal());
@@ -83,10 +84,17 @@ void UMHShadowComponent::RegisterShadowData()
 		static_cast<float>(ShadowData->LightSpaceMax.X),
 		static_cast<float>(ShadowData->LightSpaceMax.Y));
 	RenderData.DepthRange = FVector2f(ShadowData->MinLightDepth, ShadowData->MaxLightDepth);
+	RenderData.WorldToShadow = FMatrix44f(FMatrix(
+		FPlane(ShadowData->WorldToShadowRow0.X, ShadowData->WorldToShadowRow0.Y, ShadowData->WorldToShadowRow0.Z, ShadowData->WorldToShadowRow0.W),
+		FPlane(ShadowData->WorldToShadowRow1.X, ShadowData->WorldToShadowRow1.Y, ShadowData->WorldToShadowRow1.Z, ShadowData->WorldToShadowRow1.W),
+		FPlane(ShadowData->WorldToShadowRow2.X, ShadowData->WorldToShadowRow2.Y, ShadowData->WorldToShadowRow2.Z, ShadowData->WorldToShadowRow2.W),
+		FPlane(ShadowData->WorldToShadowRow3.X, ShadowData->WorldToShadowRow3.Y, ShadowData->WorldToShadowRow3.Z, ShadowData->WorldToShadowRow3.W)));
 	RenderData.RawIntervals.Reserve(ShadowData->RawIntervals.Num());
-	for (const FMHShadowDepthInterval& Interval : ShadowData->RawIntervals)
+	for (int32 IntervalIndex = 0; IntervalIndex < ShadowData->RawIntervals.Num(); ++IntervalIndex)
 	{
-		RenderData.RawIntervals.Add(FVector4f(Interval.MinDepth, Interval.MaxDepth, Interval.bValid ? 1.0f : 0.0f, 0.0f));
+		const FMHShadowDepthInterval& Interval = ShadowData->RawIntervals[IntervalIndex];
+		const float Flags = ShadowData->RawIntervalFlags.IsValidIndex(IntervalIndex) ? static_cast<float>(ShadowData->RawIntervalFlags[IntervalIndex]) : 0.0f;
+		RenderData.RawIntervals.Add(FVector4f(Interval.MinDepth, Interval.MaxDepth, Interval.bValid ? 1.0f : 0.0f, Flags));
 	}
 
 	RenderData.Nodes.Reserve(ShadowData->Nodes.Num());
