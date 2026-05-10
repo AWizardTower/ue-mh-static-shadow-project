@@ -41,6 +41,8 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 {
 	FString AssetPath = TEXT("/Game/MHShadow/Baked/MHShadowData_Test");
 	ParseStringParam(Params, TEXT("Asset="), AssetPath);
+	FString Expectation;
+	ParseStringParam(Params, TEXT("Expect="), Expectation);
 
 	UMHShadowDataAsset* Asset = LoadObject<UMHShadowDataAsset>(nullptr, *ToObjectPath(AssetPath));
 	if (!Asset)
@@ -56,6 +58,9 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 	int32 ThinFallbackIntervals = 0;
 	int32 UnpairedIntervals = 0;
 	int32 MultiHitIntervals = 0;
+	int32 PairedIntervals = 0;
+	float MaxThickness = 0.0f;
+	double ThicknessSum = 0.0;
 	for (const FColor& Color : Asset->DebugIntervalPreview)
 	{
 		UniqueColors.Add(Color);
@@ -64,11 +69,20 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 			++NonWhitePixels;
 		}
 	}
-	for (const FMHShadowDepthInterval& Interval : Asset->RawIntervals)
+	for (int32 Index = 0; Index < Asset->RawIntervals.Num(); ++Index)
 	{
+		const FMHShadowDepthInterval& Interval = Asset->RawIntervals[Index];
 		if (Interval.bValid)
 		{
 			++ValidRawIntervals;
+			const uint8 Flags = Asset->RawIntervalFlags.IsValidIndex(Index) ? Asset->RawIntervalFlags[Index] : 0;
+			const float Thickness = FMath::Max(0.0f, Interval.MaxDepth - Interval.MinDepth);
+			MaxThickness = FMath::Max(MaxThickness, Thickness);
+			ThicknessSum += Thickness;
+			if ((Flags & ((1 << 1) | (1 << 2))) == 0)
+			{
+				++PairedIntervals;
+			}
 		}
 	}
 	for (uint8 Flags : Asset->RawIntervalFlags)
@@ -96,6 +110,14 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 	bOk &= Asset->LightSpaceMax.X > Asset->LightSpaceMin.X;
 	bOk &= Asset->LightSpaceMax.Y > Asset->LightSpaceMin.Y;
 	bOk &= Asset->MaxLightDepth > Asset->MinLightDepth;
+	if (Expectation.Equals(TEXT("ClosedCube"), ESearchCase::IgnoreCase))
+	{
+		bOk &= ValidRawIntervals > 0;
+		bOk &= ValidRawIntervals < ExpectedPreviewPixels;
+		bOk &= PairedIntervals > 0;
+		bOk &= ThinFallbackIntervals < ValidRawIntervals;
+		bOk &= MaxThickness > 0.005f;
+	}
 
 	UE_LOG(LogTemp, Display, TEXT("MH shadow data inspect: %s"), *AssetPath);
 	UE_LOG(LogTemp, Display, TEXT("Resolution=%dx%d ValidTexels=%d Nodes=%d Intervals=%d RawBytes=%lld CompressedBytes=%lld Ratio=%.6f BakeSeconds=%.3f"),
@@ -114,9 +136,12 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 		UniqueColors.Num(),
 		Asset->MinLightDepth,
 		Asset->MaxLightDepth);
-	UE_LOG(LogTemp, Display, TEXT("RawIntervals=%d ValidRawIntervals=%d"),
+	UE_LOG(LogTemp, Display, TEXT("RawIntervals=%d ValidRawIntervals=%d Paired=%d AvgThickness=%.6f MaxThickness=%.6f"),
 		Asset->RawIntervals.Num(),
-		ValidRawIntervals);
+		ValidRawIntervals,
+		PairedIntervals,
+		ValidRawIntervals > 0 ? static_cast<float>(ThicknessSum / static_cast<double>(ValidRawIntervals)) : 0.0f,
+		MaxThickness);
 	UE_LOG(LogTemp, Display, TEXT("Source=%d ProjectionMapping=%d RawFlags=%d ThinFallback=%d Unpaired=%d MultiHit=%d"),
 		static_cast<int32>(Asset->BakeSource),
 		static_cast<int32>(Asset->ProjectionMapping),
@@ -124,6 +149,15 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 		ThinFallbackIntervals,
 		UnpairedIntervals,
 		MultiHitIntervals);
+	if (Expectation.Equals(TEXT("ClosedCube"), ESearchCase::IgnoreCase))
+	{
+		UE_LOG(LogTemp, Display, TEXT("ClosedCube expectation: Empty=%d Paired=%d ThinFallback=%d Valid=%d MaxThickness=%.6f"),
+			ExpectedPreviewPixels - ValidRawIntervals,
+			PairedIntervals,
+			ThinFallbackIntervals,
+			ValidRawIntervals,
+			MaxThickness);
+	}
 	UE_LOG(LogTemp, Display, TEXT("LightSpaceMin=(%.3f, %.3f) LightSpaceMax=(%.3f, %.3f)"),
 		Asset->LightSpaceMin.X,
 		Asset->LightSpaceMin.Y,

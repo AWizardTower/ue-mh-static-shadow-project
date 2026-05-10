@@ -33,6 +33,29 @@ struct FMHDualShadowMapFileData
 	int32 ThinFallbackTexelCount = 0;
 	int32 UnpairedTexelCount = 0;
 	int32 MultiHitTexelCount = 0;
+	int32 PairedTexelCount = 0;
+	float AverageThickness = 0.0f;
+	float MaxThickness = 0.0f;
+	float BakeSeconds = 0.0f;
+	FVector4f LightSpaceBoundsMin = FVector4f::Zero();
+	FVector4f LightSpaceBoundsMax = FVector4f::Zero();
+	FVector4f WorldImportanceBoundsMin = FVector4f::Zero();
+	FVector4f WorldImportanceBoundsMax = FVector4f::Zero();
+	FVector4f LightSpaceRect = FVector4f::Zero();
+	float TexelWorldSizeX = 0.0f;
+	float TexelWorldSizeY = 0.0f;
+};
+
+struct FMHDualShadowMapFileDataV3
+{
+	FMatrix44f WorldToLight = FMatrix44f::Identity;
+	int32 ShadowMapSizeX = 0;
+	int32 ShadowMapSizeY = 0;
+	int32 ValidTexelCount = 0;
+	int32 EmptyTexelCount = 0;
+	int32 ThinFallbackTexelCount = 0;
+	int32 UnpairedTexelCount = 0;
+	int32 MultiHitTexelCount = 0;
 	float AverageThickness = 0.0f;
 	float MaxThickness = 0.0f;
 	float BakeSeconds = 0.0f;
@@ -163,13 +186,36 @@ static bool LoadLightmassDualFile(
 	*Reader << Magic;
 	*Reader << Version;
 	*Reader << OutLightGuid;
-	if (Magic != 0x5344484D || Version != 3)
+	if (Magic != 0x5344484D || (Version != 3 && Version != 4))
 	{
-		UE_LOG(LogTemp, Error, TEXT("Invalid MH dual shadow sidecar header: %s Magic=0x%08x Version=%d. Rebuild lighting to regenerate the v3 sidecar."), *File, Magic, Version);
+		UE_LOG(LogTemp, Error, TEXT("Invalid MH dual shadow sidecar header: %s Magic=0x%08x Version=%d. Rebuild lighting to regenerate a v3/v4 sidecar."), *File, Magic, Version);
 		return false;
 	}
 
-	Reader->Serialize(&OutData, sizeof(OutData));
+	if (Version == 3)
+	{
+		FMHDualShadowMapFileDataV3 LegacyData;
+		Reader->Serialize(&LegacyData, sizeof(LegacyData));
+		OutData.WorldToLight = LegacyData.WorldToLight;
+		OutData.ShadowMapSizeX = LegacyData.ShadowMapSizeX;
+		OutData.ShadowMapSizeY = LegacyData.ShadowMapSizeY;
+		OutData.ValidTexelCount = LegacyData.ValidTexelCount;
+		OutData.EmptyTexelCount = LegacyData.EmptyTexelCount;
+		OutData.ThinFallbackTexelCount = LegacyData.ThinFallbackTexelCount;
+		OutData.UnpairedTexelCount = LegacyData.UnpairedTexelCount;
+		OutData.MultiHitTexelCount = LegacyData.MultiHitTexelCount;
+		OutData.PairedTexelCount = FMath::Max(0, LegacyData.ValidTexelCount - LegacyData.ThinFallbackTexelCount - LegacyData.UnpairedTexelCount);
+		OutData.AverageThickness = LegacyData.AverageThickness;
+		OutData.MaxThickness = LegacyData.MaxThickness;
+		OutData.BakeSeconds = LegacyData.BakeSeconds;
+		OutData.LightSpaceBoundsMin = LegacyData.LightSpaceBoundsMin;
+		OutData.LightSpaceBoundsMax = LegacyData.LightSpaceBoundsMax;
+		OutData.LightSpaceRect = FVector4f(LegacyData.LightSpaceBoundsMin.X, LegacyData.LightSpaceBoundsMin.Y, LegacyData.LightSpaceBoundsMax.X, LegacyData.LightSpaceBoundsMax.Y);
+	}
+	else
+	{
+		Reader->Serialize(&OutData, sizeof(OutData));
+	}
 	int32 SampleCount = 0;
 	*Reader << SampleCount;
 	if (SampleCount <= 0)
@@ -343,9 +389,9 @@ static void WriteLightmassDualStatsCsv(
 	const FString StatsDir = GetLightmassDualOutputDir(OutputObjectPath);
 
 	const FString Csv =
-		TEXT("Source,LightGuid,SourceFile,Resolution,RawTexels,ValidTexels,EmptyTexels,ThinFallbackTexels,UnpairedTexels,MultiHitTexels,AverageThickness,MaxThickness,Nodes,Intervals,RawBytes,CompressedBytes,CompressionRatio,BakeSeconds\n")
+		TEXT("Source,LightGuid,SourceFile,Resolution,RawTexels,ValidTexels,EmptyTexels,PairedTexels,ThinFallbackTexels,UnpairedTexels,MultiHitTexels,AverageThickness,MaxThickness,Nodes,Intervals,RawBytes,CompressedBytes,CompressionRatio,BakeSeconds\n")
 		+ FString::Printf(
-			TEXT("LightmassDual,%s,%s,%dx%d,%d,%d,%d,%d,%d,%d,%.8f,%.8f,%d,%d,%lld,%lld,%.6f,%.3f\n"),
+			TEXT("LightmassDual,%s,%s,%dx%d,%d,%d,%d,%d,%d,%d,%d,%.8f,%.8f,%d,%d,%lld,%lld,%.6f,%.3f\n"),
 			*LightGuid.ToString(EGuidFormats::DigitsWithHyphens),
 			*SourceFile,
 			Data.ShadowMapSizeX,
@@ -353,6 +399,7 @@ static void WriteLightmassDualStatsCsv(
 			Asset.Stats.RawTexelCount,
 			Asset.Stats.ValidTexelCount,
 			Data.EmptyTexelCount,
+			Data.PairedTexelCount,
 			Data.ThinFallbackTexelCount,
 			Data.UnpairedTexelCount,
 			Data.MultiHitTexelCount,
@@ -373,6 +420,10 @@ static void WriteLightmassDualStatsCsv(
 	BoundsCsv += FString::Printf(TEXT("Resolution,%d,%d,0,0\n"), Data.ShadowMapSizeX, Data.ShadowMapSizeY);
 	BoundsCsv += FString::Printf(TEXT("LightSpaceBoundsMin,%.9f,%.9f,%.9f,%.9f\n"), Data.LightSpaceBoundsMin.X, Data.LightSpaceBoundsMin.Y, Data.LightSpaceBoundsMin.Z, Data.LightSpaceBoundsMin.W);
 	BoundsCsv += FString::Printf(TEXT("LightSpaceBoundsMax,%.9f,%.9f,%.9f,%.9f\n"), Data.LightSpaceBoundsMax.X, Data.LightSpaceBoundsMax.Y, Data.LightSpaceBoundsMax.Z, Data.LightSpaceBoundsMax.W);
+	BoundsCsv += FString::Printf(TEXT("WorldImportanceBoundsMin,%.9f,%.9f,%.9f,%.9f\n"), Data.WorldImportanceBoundsMin.X, Data.WorldImportanceBoundsMin.Y, Data.WorldImportanceBoundsMin.Z, Data.WorldImportanceBoundsMin.W);
+	BoundsCsv += FString::Printf(TEXT("WorldImportanceBoundsMax,%.9f,%.9f,%.9f,%.9f\n"), Data.WorldImportanceBoundsMax.X, Data.WorldImportanceBoundsMax.Y, Data.WorldImportanceBoundsMax.Z, Data.WorldImportanceBoundsMax.W);
+	BoundsCsv += FString::Printf(TEXT("LightSpaceRect,%.9f,%.9f,%.9f,%.9f\n"), Data.LightSpaceRect.X, Data.LightSpaceRect.Y, Data.LightSpaceRect.Z, Data.LightSpaceRect.W);
+	BoundsCsv += FString::Printf(TEXT("TexelWorldSize,%.9f,%.9f,0,0\n"), Data.TexelWorldSizeX, Data.TexelWorldSizeY);
 	BoundsCsv += FString::Printf(TEXT("WorldToShadowRow0,%.9f,%.9f,%.9f,%.9f\n"), Matrix.M[0][0], Matrix.M[0][1], Matrix.M[0][2], Matrix.M[0][3]);
 	BoundsCsv += FString::Printf(TEXT("WorldToShadowRow1,%.9f,%.9f,%.9f,%.9f\n"), Matrix.M[1][0], Matrix.M[1][1], Matrix.M[1][2], Matrix.M[1][3]);
 	BoundsCsv += FString::Printf(TEXT("WorldToShadowRow2,%.9f,%.9f,%.9f,%.9f\n"), Matrix.M[2][0], Matrix.M[2][1], Matrix.M[2][2], Matrix.M[2][3]);
@@ -393,6 +444,7 @@ static void WriteLightmassDualDepthStatsCsv(
 	int32 ThinCount = 0;
 	int32 UnpairedCount = 0;
 	int32 MultiHitCount = 0;
+	int32 PairedCount = 0;
 	int32 OrderedCount = 0;
 	int32 InvertedCount = 0;
 	int32 NonFiniteCount = 0;
@@ -429,6 +481,7 @@ static void WriteLightmassDualDepthStatsCsv(
 		}
 
 		++ValidCount;
+		PairedCount += (SampleFlags & (MHDSF_ThinFallback | MHDSF_Unpaired)) == 0 ? 1 : 0;
 		const float Thickness = Back - Front;
 		if (Front <= Back)
 		{
@@ -464,6 +517,7 @@ static void WriteLightmassDualDepthStatsCsv(
 	Csv += FString::Printf(TEXT("Texels,%d\n"), Intervals.Num());
 	Csv += FString::Printf(TEXT("ValidTexels,%d\n"), ValidCount);
 	Csv += FString::Printf(TEXT("EmptyFlagTexels,%d\n"), EmptyCount);
+	Csv += FString::Printf(TEXT("PairedFlagTexels,%d\n"), PairedCount);
 	Csv += FString::Printf(TEXT("ThinFallbackFlagTexels,%d\n"), ThinCount);
 	Csv += FString::Printf(TEXT("UnpairedFlagTexels,%d\n"), UnpairedCount);
 	Csv += FString::Printf(TEXT("MultiHitFlagTexels,%d\n"), MultiHitCount);
@@ -627,6 +681,7 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 	Asset->DebugIntervalPreview.AddDefaulted(ExpectedTexelCount);
 
 	int32 ValidIntervalCount = 0;
+	int32 PairedIntervalCount = 0;
 	for (int32 Index = 0; Index < ExpectedTexelCount; ++Index)
 	{
 		const FMHDualShadowMapFileSample& FileSample = FileSamples[Index];
@@ -640,8 +695,13 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 		if (bValid)
 		{
 			++ValidIntervalCount;
+			if ((FileSample.Flags & (MHDSF_ThinFallback | MHDSF_Unpaired)) == 0)
+			{
+				++PairedIntervalCount;
+			}
 		}
 	}
+	FileData.PairedTexelCount = PairedIntervalCount;
 
 	FMHShadowCompressionInput CompressionInput;
 	CompressionInput.Resolution = Asset->Resolution;
@@ -683,13 +743,14 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 	WriteLightmassDualDepthStatsCsv(OutputObjectPath, Asset->RawIntervals, Asset->RawIntervalFlags);
 	WriteLightmassDualHitSequenceCsv(OutputObjectPath, DebugRays, DebugHits);
 
-	UE_LOG(LogTemp, Display, TEXT("Imported LightmassDual MH shadow asset: %s Source=%s Resolution=%dx%d Valid=%d Nodes=%d Flags Thin=%d Unpaired=%d MultiHit=%d DebugRays=%d DebugHits=%d"),
+	UE_LOG(LogTemp, Display, TEXT("Imported LightmassDual MH shadow asset: %s Source=%s Resolution=%dx%d Valid=%d Nodes=%d Flags Paired=%d Thin=%d Unpaired=%d MultiHit=%d DebugRays=%d DebugHits=%d"),
 		*OutputObjectPath,
 		*FilePath,
 		Asset->Resolution.X,
 		Asset->Resolution.Y,
 		Asset->Stats.ValidTexelCount,
 		Asset->Stats.NodeCount,
+		FileData.PairedTexelCount,
 		FileData.ThinFallbackTexelCount,
 		FileData.UnpairedTexelCount,
 		FileData.MultiHitTexelCount,
