@@ -6,9 +6,11 @@ namespace
 {
 struct FBuildNode
 {
-	FMHShadowDepthInterval Interval;
+	FMHShadowDepthInterval Bounds;
 	TStaticArray<TUniquePtr<FBuildNode>, 4> Children;
+	float RepresentativeDepth = 1.0f;
 	int32 Level = 0;
+	bool bHasRepresentativeDepth = false;
 
 	bool HasAnyChild() const
 	{
@@ -28,6 +30,33 @@ struct FBuildNode
 	}
 };
 
+static FMHShadowDepthInterval MakeFarInterval()
+{
+	FMHShadowDepthInterval Interval;
+	Interval.MinDepth = 1.0f;
+	Interval.MaxDepth = 1.0f;
+	Interval.bValid = true;
+	return Interval;
+}
+
+static FMHShadowDepthInterval NormalizeInputInterval(const FMHShadowDepthInterval& Interval)
+{
+	if (!Interval.bValid)
+	{
+		return MakeFarInterval();
+	}
+
+	FMHShadowDepthInterval Normalized = Interval;
+	if (Normalized.MinDepth > Normalized.MaxDepth)
+	{
+		Swap(Normalized.MinDepth, Normalized.MaxDepth);
+	}
+	Normalized.MinDepth = FMath::Clamp(Normalized.MinDepth, 0.0f, 1.0f);
+	Normalized.MaxDepth = FMath::Clamp(Normalized.MaxDepth, 0.0f, 1.0f);
+	Normalized.bValid = true;
+	return Normalized;
+}
+
 static bool IntersectIntervals(const FMHShadowDepthInterval& A, const FMHShadowDepthInterval& B, FMHShadowDepthInterval& Out)
 {
 	if (!A.bValid || !B.bValid)
@@ -41,52 +70,90 @@ static bool IntersectIntervals(const FMHShadowDepthInterval& A, const FMHShadowD
 	return Out.bValid;
 }
 
-static bool IntersectSubset(const TStaticArray<FBuildNode*, 4>& Children, uint8 Mask, FMHShadowDepthInterval& Out)
+static bool ContainsDepth(const FMHShadowDepthInterval& Interval, float Depth)
 {
-	bool bHasFirst = false;
-	FMHShadowDepthInterval Accumulated;
+	return Interval.bValid && Interval.MinDepth <= Depth && Interval.MaxDepth >= Depth;
+}
+
+static int32 CountContainingIntervals(const TStaticArray<FBuildNode*, 4>& Children, float Depth)
+{
+	int32 Count = 0;
 
 	for (int32 ChildIndex = 0; ChildIndex < 4; ++ChildIndex)
 	{
-		if ((Mask & (1u << ChildIndex)) == 0)
-		{
-			continue;
-		}
-
 		FBuildNode* Child = Children[ChildIndex];
-		if (!Child || !Child->IsUniformLeaf() || !Child->Interval.bValid)
+		if (Child && ContainsDepth(Child->Bounds, Depth))
 		{
-			return false;
-		}
-
-		if (!bHasFirst)
-		{
-			Accumulated = Child->Interval;
-			bHasFirst = true;
-		}
-		else if (!IntersectIntervals(Accumulated, Child->Interval, Accumulated))
-		{
-			return false;
+			++Count;
 		}
 	}
 
-	if (!bHasFirst)
-	{
-		return false;
-	}
-
-	Out = Accumulated;
-	return true;
+	return Count;
 }
 
-static int32 CountBits(uint8 Mask)
+static FMHShadowDepthInterval ComputeBoundsForDepth(const TStaticArray<FBuildNode*, 4>& Children, float Depth)
 {
-	int32 Count = 0;
-	for (int32 Index = 0; Index < 4; ++Index)
+	FMHShadowDepthInterval Bounds;
+	Bounds.MinDepth = 0.0f;
+	Bounds.MaxDepth = 1.0f;
+	Bounds.bValid = true;
+
+	bool bAnyCovered = false;
+	for (FBuildNode* Child : Children)
 	{
-		Count += (Mask & (1u << Index)) ? 1 : 0;
+		if (Child && ContainsDepth(Child->Bounds, Depth))
+		{
+			Bounds.MinDepth = bAnyCovered ? FMath::Max(Bounds.MinDepth, Child->Bounds.MinDepth) : Child->Bounds.MinDepth;
+			Bounds.MaxDepth = bAnyCovered ? FMath::Min(Bounds.MaxDepth, Child->Bounds.MaxDepth) : Child->Bounds.MaxDepth;
+			bAnyCovered = true;
+		}
 	}
-	return Count;
+
+	if (!bAnyCovered || Bounds.MinDepth > Bounds.MaxDepth)
+	{
+		Bounds.MinDepth = Depth;
+		Bounds.MaxDepth = Depth;
+	}
+
+	return Bounds;
+}
+
+static void ChooseRepresentativeDepth(const TStaticArray<FBuildNode*, 4>& Children, float& OutDepth, FMHShadowDepthInterval& OutBounds)
+{
+	FMHShadowDepthInterval Intersection = Children[0]->Bounds;
+	for (int32 ChildIndex = 1; ChildIndex < 4; ++ChildIndex)
+	{
+		FMHShadowDepthInterval NewIntersection;
+		if (!IntersectIntervals(Intersection, Children[ChildIndex]->Bounds, NewIntersection))
+		{
+			Intersection.bValid = false;
+			break;
+		}
+		Intersection = NewIntersection;
+	}
+
+	if (Intersection.bValid)
+	{
+		OutBounds = Intersection;
+		OutDepth = (Intersection.MinDepth + Intersection.MaxDepth) * 0.5f;
+		return;
+	}
+
+	int32 BestCount = -1;
+	float BestDepth = Children[0]->Bounds.MinDepth;
+	for (int32 ChildIndex = 0; ChildIndex < 4; ++ChildIndex)
+	{
+		const float CandidateDepth = Children[ChildIndex]->Bounds.MinDepth;
+		const int32 CandidateCount = CountContainingIntervals(Children, CandidateDepth);
+		if (CandidateCount > BestCount)
+		{
+			BestCount = CandidateCount;
+			BestDepth = CandidateDepth;
+		}
+	}
+
+	OutDepth = BestDepth;
+	OutBounds = ComputeBoundsForDepth(Children, BestDepth);
 }
 
 static TUniquePtr<FBuildNode> BuildNode(const FMHShadowCompressionInput& Input, int32 X, int32 Y, int32 Size, int32 Level)
@@ -97,9 +164,11 @@ static TUniquePtr<FBuildNode> BuildNode(const FMHShadowCompressionInput& Input, 
 	if (Size == 1)
 	{
 		const int32 TexelIndex = Y * Input.Resolution.X + X;
-		Node->Interval = Input.TexelIntervals.IsValidIndex(TexelIndex)
-			? Input.TexelIntervals[TexelIndex]
-			: FMHShadowDepthInterval();
+		Node->Bounds = Input.TexelIntervals.IsValidIndex(TexelIndex)
+			? NormalizeInputInterval(Input.TexelIntervals[TexelIndex])
+			: MakeFarInterval();
+		Node->RepresentativeDepth = (Node->Bounds.MinDepth + Node->Bounds.MaxDepth) * 0.5f;
+		Node->bHasRepresentativeDepth = true;
 		return Node;
 	}
 
@@ -110,47 +179,30 @@ static TUniquePtr<FBuildNode> BuildNode(const FMHShadowCompressionInput& Input, 
 	Node->Children[3] = BuildNode(Input, X + HalfSize, Y + HalfSize, HalfSize, Level + 1);
 
 	TStaticArray<FBuildNode*, 4> ChildPtrs;
-	bool bAllUniformEmpty = true;
 	for (int32 ChildIndex = 0; ChildIndex < 4; ++ChildIndex)
 	{
 		ChildPtrs[ChildIndex] = Node->Children[ChildIndex].Get();
-		bAllUniformEmpty &= ChildPtrs[ChildIndex]->IsUniformLeaf() && !ChildPtrs[ChildIndex]->Interval.bValid;
 	}
 
-	if (bAllUniformEmpty)
+	ChooseRepresentativeDepth(ChildPtrs, Node->RepresentativeDepth, Node->Bounds);
+	Node->bHasRepresentativeDepth = true;
+
+	for (int32 ChildIndex = 0; ChildIndex < 4; ++ChildIndex)
 	{
-		for (TUniquePtr<FBuildNode>& Child : Node->Children)
+		FBuildNode* Child = Node->Children[ChildIndex].Get();
+		if (!Child || !ContainsDepth(Child->Bounds, Node->RepresentativeDepth))
 		{
-			Child.Reset();
+			continue;
 		}
-		return Node;
-	}
 
-	uint8 BestMask = 0;
-	FMHShadowDepthInterval BestInterval;
-	int32 BestCount = 0;
-
-	for (uint8 Mask = 1; Mask < 16; ++Mask)
-	{
-		FMHShadowDepthInterval Candidate;
-		const int32 CandidateCount = CountBits(Mask);
-		if (CandidateCount > BestCount && IntersectSubset(ChildPtrs, Mask, Candidate))
+		if (Child->HasAnyChild())
 		{
-			BestMask = Mask;
-			BestInterval = Candidate;
-			BestCount = CandidateCount;
+			Child->bHasRepresentativeDepth = false;
+			Child->RepresentativeDepth = 1.0f;
 		}
-	}
-
-	if (BestCount > 0)
-	{
-		Node->Interval = BestInterval;
-		for (int32 ChildIndex = 0; ChildIndex < 4; ++ChildIndex)
+		else
 		{
-			if ((BestMask & (1u << ChildIndex)) != 0)
-			{
-				Node->Children[ChildIndex].Reset();
-			}
+			Node->Children[ChildIndex].Reset();
 		}
 	}
 
@@ -173,7 +225,11 @@ static int32 FlattenNode(const FBuildNode& BuildNode, FMHShadowCompressionOutput
 {
 	FMHShadowNode Node;
 	Node.Level = BuildNode.Level;
-	Node.IntervalIndex = AddInterval(BuildNode.Interval, Output);
+	Node.RepresentativeDepth = BuildNode.RepresentativeDepth;
+	Node.BoundsMinDepth = BuildNode.Bounds.MinDepth;
+	Node.BoundsMaxDepth = BuildNode.Bounds.MaxDepth;
+	Node.bHasRepresentativeDepth = BuildNode.bHasRepresentativeDepth;
+	Node.IntervalIndex = AddInterval(BuildNode.Bounds, Output);
 
 	const int32 NodeIndex = Output.Nodes.Num();
 	Output.Nodes.Add(Node);
@@ -250,8 +306,7 @@ bool FMHShadowCompressor::Compress(const FMHShadowCompressionInput& Input, FMHSh
 	Output.Stats.IntervalCount = Output.Intervals.Num();
 	Output.Stats.RawBytes = static_cast<int64>(ExpectedTexels) * static_cast<int64>(sizeof(float) * 2);
 	Output.Stats.CompressedBytes =
-		static_cast<int64>(Output.Nodes.Num()) * static_cast<int64>(sizeof(int32) * 6)
-		+ static_cast<int64>(Output.Intervals.Num()) * static_cast<int64>(sizeof(float) * 2);
+		static_cast<int64>(Output.Nodes.Num()) * static_cast<int64>(sizeof(int32) * 4 + sizeof(float) * 3 + sizeof(uint32));
 	Output.Stats.CompressionRatio = Output.Stats.RawBytes > 0
 		? static_cast<float>(static_cast<double>(Output.Stats.CompressedBytes) / static_cast<double>(Output.Stats.RawBytes))
 		: 1.0f;

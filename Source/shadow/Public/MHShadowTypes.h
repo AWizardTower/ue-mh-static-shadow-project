@@ -48,6 +48,18 @@ struct FMHShadowNode
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	int32 Level = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	float RepresentativeDepth = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	float BoundsMinDepth = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	float BoundsMaxDepth = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	bool bHasRepresentativeDepth = false;
 };
 
 USTRUCT(BlueprintType)

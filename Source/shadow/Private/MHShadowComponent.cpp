@@ -70,6 +70,7 @@ void UMHShadowComponent::RegisterShadowData()
 
 	UE::Renderer::MHStaticShadow::FShadowData RenderData;
 	RenderData.Id = RegistrationId;
+	RenderData.DebugName = ShadowData->GetPathName();
 	RenderData.Resolution = ShadowData->Resolution;
 	RenderData.TileSize = ShadowData->TileSize;
 	RenderData.DepthBias = ShadowData->DepthBias;
@@ -103,23 +104,16 @@ void UMHShadowComponent::RegisterShadowData()
 	{
 		UE::Renderer::MHStaticShadow::FShadowNode RenderNode;
 		RenderNode.ChildIndices = Node.ChildIndices;
-
-		const bool bHasInterval = ShadowData->Intervals.IsValidIndex(Node.IntervalIndex)
-			&& ShadowData->Intervals[Node.IntervalIndex].bValid;
-		if (bHasInterval)
-		{
-			const FMHShadowDepthInterval& Interval = ShadowData->Intervals[Node.IntervalIndex];
-			RenderNode.IntervalAndFlags = FVector4f(Interval.MinDepth, Interval.MaxDepth, 1.0f, 0.0f);
-		}
-		else
-		{
-			RenderNode.IntervalAndFlags = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
-		}
-
-		if (Node.ChildIndices.X >= 0 || Node.ChildIndices.Y >= 0 || Node.ChildIndices.Z >= 0 || Node.ChildIndices.W >= 0)
-		{
-			RenderNode.IntervalAndFlags.W = 1.0f;
-		}
+		RenderNode.IntervalAndFlags = FVector4f(
+			Node.BoundsMinDepth,
+			Node.BoundsMaxDepth,
+			Node.bHasRepresentativeDepth ? 1.0f : 0.0f,
+			0.0f);
+		RenderNode.RepresentativeAndBounds = FVector4f(
+			Node.RepresentativeDepth,
+			Node.BoundsMinDepth,
+			Node.BoundsMaxDepth,
+			Node.bHasRepresentativeDepth ? 1.0f : 0.0f);
 
 		RenderData.Nodes.Add(RenderNode);
 	}

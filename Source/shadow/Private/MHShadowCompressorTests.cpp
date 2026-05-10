@@ -17,6 +17,20 @@ FMHShadowDepthInterval MakeTestInterval(float MinDepth, float MaxDepth)
 	return Interval;
 }
 
+FMHShadowDepthInterval MakeEmptyInterval()
+{
+	return FMHShadowDepthInterval();
+}
+
+FMHShadowDepthInterval NormalizeForCompression(const FMHShadowDepthInterval& Interval)
+{
+	if (!Interval.bValid)
+	{
+		return MakeTestInterval(1.0f, 1.0f);
+	}
+	return Interval;
+}
+
 int32 GetChildIndex(const FIntVector4& ChildIndices, int32 ChildSlot)
 {
 	switch (ChildSlot)
@@ -32,30 +46,33 @@ int32 GetChildIndex(const FIntVector4& ChildIndices, int32 ChildSlot)
 	}
 }
 
-const FMHShadowDepthInterval* FindNodeInterval(const FMHShadowCompressionOutput& Output, const FMHShadowNode& Node)
+bool SampleCompressedDepth(const TArray<FMHShadowNode>& Nodes, FIntPoint Resolution, int32 X, int32 Y, float& OutDepth)
 {
-	return Output.Intervals.IsValidIndex(Node.IntervalIndex) ? &Output.Intervals[Node.IntervalIndex] : nullptr;
-}
-
-const FMHShadowDepthInterval* SampleCompressedTree(const FMHShadowCompressionOutput& Output, FIntPoint Resolution, int32 X, int32 Y)
-{
-	if (!Output.Nodes.IsValidIndex(0))
+	if (!Nodes.IsValidIndex(0))
 	{
-		return nullptr;
+		return false;
 	}
 
 	int32 NodeIndex = 0;
 	FIntPoint NodeMin(0, 0);
 	int32 NodeSize = Resolution.X;
+	bool bHasDepth = false;
+	OutDepth = 1.0f;
 
 	for (int32 Step = 0; Step < 32; ++Step)
 	{
-		if (!Output.Nodes.IsValidIndex(NodeIndex))
+		if (!Nodes.IsValidIndex(NodeIndex))
 		{
-			return nullptr;
+			return bHasDepth;
 		}
 
-		const FMHShadowNode& Node = Output.Nodes[NodeIndex];
+		const FMHShadowNode& Node = Nodes[NodeIndex];
+		if (Node.bHasRepresentativeDepth)
+		{
+			OutDepth = Node.RepresentativeDepth;
+			bHasDepth = true;
+		}
+
 		const bool bHasChildren = Node.ChildIndices.X >= 0
 			|| Node.ChildIndices.Y >= 0
 			|| Node.ChildIndices.Z >= 0
@@ -63,7 +80,7 @@ const FMHShadowDepthInterval* SampleCompressedTree(const FMHShadowCompressionOut
 
 		if (!bHasChildren || NodeSize <= 1)
 		{
-			return FindNodeInterval(Output, Node);
+			return bHasDepth;
 		}
 
 		const int32 ChildSize = FMath::Max(NodeSize / 2, 1);
@@ -74,7 +91,7 @@ const FMHShadowDepthInterval* SampleCompressedTree(const FMHShadowCompressionOut
 
 		if (ChildNodeIndex < 0)
 		{
-			return FindNodeInterval(Output, Node);
+			return bHasDepth;
 		}
 
 		NodeIndex = ChildNodeIndex;
@@ -83,34 +100,46 @@ const FMHShadowDepthInterval* SampleCompressedTree(const FMHShadowCompressionOut
 		NodeSize = ChildSize;
 	}
 
-	return nullptr;
+	return bHasDepth;
 }
 
-bool TestIntervalEquals(FAutomationTestBase& Test, const TCHAR* Context, const FMHShadowDepthInterval* Actual, const FMHShadowDepthInterval& Expected)
+bool TestDepthInsideInterval(FAutomationTestBase& Test, const TCHAR* Context, float Depth, const FMHShadowDepthInterval& ExpectedInterval)
 {
-	if (!Actual)
-	{
-		Test.AddError(FString::Printf(TEXT("%s: expected a valid interval, got none."), Context));
-		return false;
-	}
-
-	const bool bMatches = Actual->bValid == Expected.bValid
-		&& FMath::IsNearlyEqual(Actual->MinDepth, Expected.MinDepth)
-		&& FMath::IsNearlyEqual(Actual->MaxDepth, Expected.MaxDepth);
-	if (!bMatches)
+	const FMHShadowDepthInterval Interval = NormalizeForCompression(ExpectedInterval);
+	const bool bInside = Depth >= Interval.MinDepth - KINDA_SMALL_NUMBER && Depth <= Interval.MaxDepth + KINDA_SMALL_NUMBER;
+	if (!bInside)
 	{
 		Test.AddError(FString::Printf(
-			TEXT("%s: expected [%f, %f] valid=%d, got [%f, %f] valid=%d."),
+			TEXT("%s: sampled representative depth %f is outside interval [%f, %f]."),
 			Context,
-			Expected.MinDepth,
-			Expected.MaxDepth,
-			Expected.bValid ? 1 : 0,
-			Actual->MinDepth,
-			Actual->MaxDepth,
-			Actual->bValid ? 1 : 0));
+			Depth,
+			Interval.MinDepth,
+			Interval.MaxDepth));
 	}
+	return bInside;
+}
 
-	return bMatches;
+bool ValidateAllTexels(FAutomationTestBase& Test, const FMHShadowCompressionInput& Input, const FMHShadowCompressionOutput& Output)
+{
+	bool bOk = true;
+	for (int32 Y = 0; Y < Input.Resolution.Y; ++Y)
+	{
+		for (int32 X = 0; X < Input.Resolution.X; ++X)
+		{
+			float Depth = 1.0f;
+			const bool bSampled = SampleCompressedDepth(Output.Nodes, Input.Resolution, X, Y, Depth);
+			if (!bSampled)
+			{
+				Test.AddError(FString::Printf(TEXT("No representative depth sampled at texel %d,%d."), X, Y));
+				bOk = false;
+				continue;
+			}
+
+			const int32 TexelIndex = Y * Input.Resolution.X + X;
+			bOk &= TestDepthInsideInterval(Test, *FString::Printf(TEXT("Texel %d,%d"), X, Y), Depth, Input.TexelIntervals[TexelIndex]);
+		}
+	}
+	return bOk;
 }
 }
 
@@ -120,42 +149,86 @@ bool FMHShadowCompressorUniformTest::RunTest(const FString& Parameters)
 {
 	FMHShadowCompressionInput Input;
 	Input.Resolution = FIntPoint(2, 2);
-	Input.TexelIntervals.Init(MakeTestInterval(10.0f, 20.0f), 4);
+	Input.TexelIntervals.Init(MakeTestInterval(0.25f, 0.75f), 4);
 
 	FMHShadowCompressionOutput Output;
 	FString Error;
 	TestTrue(TEXT("Uniform input compresses successfully."), FMHShadowCompressor::Compress(Input, Output, &Error));
 	TestEqual(TEXT("Uniform 2x2 input collapses to one node."), Output.Nodes.Num(), 1);
-	TestEqual(TEXT("Uniform 2x2 input stores one interval."), Output.Intervals.Num(), 1);
-
-	const FMHShadowDepthInterval Expected = MakeTestInterval(10.0f, 20.0f);
-	TestIntervalEquals(*this, TEXT("Sample 0,0"), SampleCompressedTree(Output, Input.Resolution, 0, 0), Expected);
-	TestIntervalEquals(*this, TEXT("Sample 1,1"), SampleCompressedTree(Output, Input.Resolution, 1, 1), Expected);
+	TestTrue(TEXT("Root stores a representative depth."), Output.Nodes[0].bHasRepresentativeDepth);
+	TestDepthInsideInterval(*this, TEXT("Root representative"), Output.Nodes[0].RepresentativeDepth, Input.TexelIntervals[0]);
+	TestTrue(TEXT("Every texel samples a legal representative depth."), ValidateAllTexels(*this, Input, Output));
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMHShadowCompressorMixedTest, "Shadow.MH.Compressor.Mixed2x2PreservesTexels", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMHShadowCompressorDisjointTest, "Shadow.MH.Compressor.Disjoint2x2PreservesLegalDepths", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FMHShadowCompressorMixedTest::RunTest(const FString& Parameters)
+bool FMHShadowCompressorDisjointTest::RunTest(const FString& Parameters)
 {
 	FMHShadowCompressionInput Input;
 	Input.Resolution = FIntPoint(2, 2);
 	Input.TexelIntervals = {
-		MakeTestInterval(0.0f, 1.0f),
-		MakeTestInterval(10.0f, 12.0f),
-		MakeTestInterval(20.0f, 25.0f),
-		MakeTestInterval(30.0f, 33.0f)
+		MakeTestInterval(0.05f, 0.10f),
+		MakeTestInterval(0.30f, 0.35f),
+		MakeTestInterval(0.55f, 0.60f),
+		MakeTestInterval(0.80f, 0.85f)
 	};
 
 	FMHShadowCompressionOutput Output;
 	FString Error;
-	TestTrue(TEXT("Mixed input compresses successfully."), FMHShadowCompressor::Compress(Input, Output, &Error));
-	TestEqual(TEXT("Mixed 2x2 input keeps four intervals represented."), Output.Intervals.Num(), 4);
+	TestTrue(TEXT("Disjoint input compresses successfully."), FMHShadowCompressor::Compress(Input, Output, &Error));
+	TestTrue(TEXT("Disjoint input keeps refinement nodes."), Output.Nodes.Num() > 1);
+	TestTrue(TEXT("Every texel samples a legal representative depth."), ValidateAllTexels(*this, Input, Output));
+	return true;
+}
 
-	TestIntervalEquals(*this, TEXT("Sample 0,0"), SampleCompressedTree(Output, Input.Resolution, 0, 0), Input.TexelIntervals[0]);
-	TestIntervalEquals(*this, TEXT("Sample 1,0"), SampleCompressedTree(Output, Input.Resolution, 1, 0), Input.TexelIntervals[1]);
-	TestIntervalEquals(*this, TEXT("Sample 0,1"), SampleCompressedTree(Output, Input.Resolution, 0, 1), Input.TexelIntervals[2]);
-	TestIntervalEquals(*this, TEXT("Sample 1,1"), SampleCompressedTree(Output, Input.Resolution, 1, 1), Input.TexelIntervals[3]);
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMHShadowCompressorMixedEmptyTest, "Shadow.MH.Compressor.MixedEmptyTexelsUseFarDepth", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMHShadowCompressorMixedEmptyTest::RunTest(const FString& Parameters)
+{
+	FMHShadowCompressionInput Input;
+	Input.Resolution = FIntPoint(2, 2);
+	Input.TexelIntervals = {
+		MakeEmptyInterval(),
+		MakeTestInterval(0.20f, 0.30f),
+		MakeEmptyInterval(),
+		MakeTestInterval(0.60f, 0.70f)
+	};
+
+	FMHShadowCompressionOutput Output;
+	FString Error;
+	TestTrue(TEXT("Mixed empty input compresses successfully."), FMHShadowCompressor::Compress(Input, Output, &Error));
+	TestTrue(TEXT("Every texel samples a legal representative depth."), ValidateAllTexels(*this, Input, Output));
+
+	float EmptyDepth = 0.0f;
+	TestTrue(TEXT("Empty texel samples a representative depth."), SampleCompressedDepth(Output.Nodes, Input.Resolution, 0, 0, EmptyDepth));
+	TestTrue(TEXT("Empty texel samples far depth."), FMath::IsNearlyEqual(EmptyDepth, 1.0f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMHShadowCompressorAncestorFallbackTest, "Shadow.MH.Compressor.EmptyInnerNodeFallsBackToAncestorDepth", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMHShadowCompressorAncestorFallbackTest::RunTest(const FString& Parameters)
+{
+	TArray<FMHShadowNode> Nodes;
+	Nodes.SetNum(3);
+
+	Nodes[0].ChildIndices = FIntVector4(1, -1, -1, -1);
+	Nodes[0].RepresentativeDepth = 0.5f;
+	Nodes[0].bHasRepresentativeDepth = true;
+
+	Nodes[1].ChildIndices = FIntVector4(-1, 2, -1, -1);
+	Nodes[1].bHasRepresentativeDepth = false;
+
+	Nodes[2].RepresentativeDepth = 0.25f;
+	Nodes[2].bHasRepresentativeDepth = true;
+
+	float Depth = 0.0f;
+	TestTrue(TEXT("Missing grandchild samples ancestor representative depth."), SampleCompressedDepth(Nodes, FIntPoint(4, 4), 0, 0, Depth));
+	TestTrue(TEXT("Ancestor representative depth is returned."), FMath::IsNearlyEqual(Depth, 0.5f));
+
+	TestTrue(TEXT("Present grandchild samples own representative depth."), SampleCompressedDepth(Nodes, FIntPoint(4, 4), 1, 0, Depth));
+	TestTrue(TEXT("Grandchild representative depth is returned."), FMath::IsNearlyEqual(Depth, 0.25f));
 	return true;
 }
 
