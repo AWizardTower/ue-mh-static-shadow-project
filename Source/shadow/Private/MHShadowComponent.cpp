@@ -73,6 +73,7 @@ void UMHShadowComponent::RegisterShadowData()
 	RenderData.DebugName = ShadowData->GetPathName();
 	RenderData.Resolution = ShadowData->Resolution;
 	RenderData.TileSize = ShadowData->TileSize;
+	RenderData.TileCount = ShadowData->TileCount;
 	RenderData.DepthBias = ShadowData->DepthBias;
 	RenderData.ProjectionMapping = ShadowData->ProjectionMapping == EMHShadowProjectionMapping::LightmassWorldToShadowMatrix ? 1u : 0u;
 	RenderData.LightOrigin = FVector3f(ShadowData->LightOrigin);
@@ -118,13 +119,32 @@ void UMHShadowComponent::RegisterShadowData()
 		RenderData.Nodes.Add(RenderNode);
 	}
 
+	RenderData.Tiles.Reserve(ShadowData->Tiles.Num());
+	for (const FMHShadowTile& Tile : ShadowData->Tiles)
+	{
+		UE::Renderer::MHStaticShadow::FShadowTile RenderTile;
+		RenderTile.TexelRect = Tile.TexelRect;
+		RenderTile.NodeAndPage = FIntVector4(Tile.NodeOffset, Tile.NodeCount, Tile.RootNodeIndex, Tile.PageIndex);
+		RenderTile.CoordAndFlags = FIntVector4(Tile.TileCoord.X, Tile.TileCoord.Y, Tile.bResidentDefault ? 1 : 0, 0);
+		RenderTile.Stats = FVector4f(
+			static_cast<float>(Tile.RawTexelCount),
+			static_cast<float>(Tile.ValidTexelCount),
+			Tile.CompressionRatio,
+			static_cast<float>(Tile.CompressedNodeCount));
+		RenderData.Tiles.Add(RenderTile);
+	}
+
+	RenderData.PageTable = ShadowData->PageTable;
+
 	UE::Renderer::MHStaticShadow::RegisterOrUpdateShadowData(RenderData);
 	bRegisteredWithRenderer = true;
-	UE_LOG(LogTemp, Display, TEXT("MHShadowComponent registered ShadowData component=%s asset=%s resolution=%dx%d nodes=%d rawIntervals=%d"),
+	UE_LOG(LogTemp, Display, TEXT("MHShadowComponent registered ShadowData component=%s asset=%s resolution=%dx%d tiles=%dx%d nodes=%d rawIntervals=%d"),
 		*GetPathName(),
 		*ShadowData->GetPathName(),
 		ShadowData->Resolution.X,
 		ShadowData->Resolution.Y,
+		ShadowData->TileCount.X,
+		ShadowData->TileCount.Y,
 		ShadowData->Nodes.Num(),
 		ShadowData->RawIntervals.Num());
 #else

@@ -589,6 +589,203 @@ static void WriteLightmassDualHitSequenceCsv(
 	FFileHelper::SaveStringToFile(HitCsv, *FPaths::Combine(StatsDir, SafeName + TEXT("_LightmassDual_HitSequence.csv")));
 }
 
+static int32 GetChildIndex(const FIntVector4& ChildIndices, int32 ChildSlot)
+{
+	switch (ChildSlot)
+	{
+	case 0:
+		return ChildIndices.X;
+	case 1:
+		return ChildIndices.Y;
+	case 2:
+		return ChildIndices.Z;
+	default:
+		return ChildIndices.W;
+	}
+}
+
+static void SetChildIndex(FIntVector4& ChildIndices, int32 ChildSlot, int32 ChildIndex)
+{
+	switch (ChildSlot)
+	{
+	case 0:
+		ChildIndices.X = ChildIndex;
+		break;
+	case 1:
+		ChildIndices.Y = ChildIndex;
+		break;
+	case 2:
+		ChildIndices.Z = ChildIndex;
+		break;
+	default:
+		ChildIndices.W = ChildIndex;
+		break;
+	}
+}
+
+static int64 GetCompressedNodeBytes(int32 NodeCount)
+{
+	return static_cast<int64>(NodeCount) * static_cast<int64>(sizeof(int32) * 4 + sizeof(float) * 3 + sizeof(uint32));
+}
+
+static bool SampleRepresentativeDepthFromTile(
+	const TArray<FMHShadowNode>& Nodes,
+	const FMHShadowTile& Tile,
+	int32 LocalX,
+	int32 LocalY,
+	int32 TileSize,
+	float& OutDepth)
+{
+	OutDepth = 1.0f;
+	if (Tile.RootNodeIndex < 0 || Tile.NodeCount <= 0 || TileSize <= 0 || !Nodes.IsValidIndex(Tile.RootNodeIndex))
+	{
+		return false;
+	}
+
+	int32 NodeIndex = Tile.RootNodeIndex;
+	FIntPoint NodeMin(0, 0);
+	int32 NodeSize = TileSize;
+	bool bHasDepth = false;
+
+	for (int32 Step = 0; Step < 32; ++Step)
+	{
+		if (!Nodes.IsValidIndex(NodeIndex))
+		{
+			return bHasDepth;
+		}
+
+		const FMHShadowNode& Node = Nodes[NodeIndex];
+		if (Node.bHasRepresentativeDepth)
+		{
+			OutDepth = Node.RepresentativeDepth;
+			bHasDepth = true;
+		}
+
+		const bool bHasChildren = Node.ChildIndices.X >= 0
+			|| Node.ChildIndices.Y >= 0
+			|| Node.ChildIndices.Z >= 0
+			|| Node.ChildIndices.W >= 0;
+		if (!bHasChildren || NodeSize <= 1)
+		{
+			return bHasDepth;
+		}
+
+		const int32 ChildSize = FMath::Max(NodeSize / 2, 1);
+		const int32 ChildX = (LocalX - NodeMin.X) >= ChildSize ? 1 : 0;
+		const int32 ChildY = (LocalY - NodeMin.Y) >= ChildSize ? 1 : 0;
+		const int32 ChildSlot = ChildY * 2 + ChildX;
+		const int32 ChildNodeIndex = GetChildIndex(Node.ChildIndices, ChildSlot);
+		if (ChildNodeIndex < Tile.NodeOffset || ChildNodeIndex >= Tile.NodeOffset + Tile.NodeCount)
+		{
+			return bHasDepth;
+		}
+
+		NodeIndex = ChildNodeIndex;
+		NodeMin.X += ChildX * ChildSize;
+		NodeMin.Y += ChildY * ChildSize;
+		NodeSize = ChildSize;
+	}
+
+	return bHasDepth;
+}
+
+static void BuildLightmassDualTileData(
+	const FString& OutputObjectPath,
+	UMHShadowDataAsset& Asset)
+{
+	const FString SafeName = GetAssetStemFromObjectPath(OutputObjectPath);
+	const FString StatsDir = GetLightmassDualOutputDir(OutputObjectPath);
+	const int32 TileCount = Asset.Tiles.Num();
+
+	int32 EmptyTileCount = 0;
+	int32 WorstTileIndex = INDEX_NONE;
+	float MinRatio = TNumericLimits<float>::Max();
+	float MaxRatio = 0.0f;
+	double RatioSum = 0.0;
+	FString Csv;
+	Csv += TEXT("TileIndex,TileX,TileY,PageIndex,TexelMinX,TexelMinY,TexelMaxX,TexelMaxY,RawTexels,ValidTexels,NodeOffset,NodeCount,RootNodeIndex,CompressionRatio,Resident\n");
+
+	for (int32 TileIndex = 0; TileIndex < TileCount; ++TileIndex)
+	{
+		const FMHShadowTile& Tile = Asset.Tiles[TileIndex];
+		EmptyTileCount += Tile.ValidTexelCount == 0 ? 1 : 0;
+		MinRatio = FMath::Min(MinRatio, Tile.CompressionRatio);
+		if (Tile.CompressionRatio > MaxRatio)
+		{
+			MaxRatio = Tile.CompressionRatio;
+			WorstTileIndex = TileIndex;
+		}
+		RatioSum += Tile.CompressionRatio;
+
+		Csv += FString::Printf(
+			TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.9f,%d\n"),
+			TileIndex,
+			Tile.TileCoord.X,
+			Tile.TileCoord.Y,
+			Tile.PageIndex,
+			Tile.TexelRect.X,
+			Tile.TexelRect.Y,
+			Tile.TexelRect.Z,
+			Tile.TexelRect.W,
+			Tile.RawTexelCount,
+			Tile.ValidTexelCount,
+			Tile.NodeOffset,
+			Tile.NodeCount,
+			Tile.RootNodeIndex,
+			Tile.CompressionRatio,
+			Tile.bResidentDefault ? 1 : 0);
+	}
+
+	const float AvgRatio = TileCount > 0 ? static_cast<float>(RatioSum / static_cast<double>(TileCount)) : 1.0f;
+	Csv += TEXT("\nMetric,Value\n");
+	Csv += FString::Printf(TEXT("TileSize,%d\n"), Asset.TileSize);
+	Csv += FString::Printf(TEXT("TileCountX,%d\n"), Asset.TileCount.X);
+	Csv += FString::Printf(TEXT("TileCountY,%d\n"), Asset.TileCount.Y);
+	Csv += FString::Printf(TEXT("EmptyTileCount,%d\n"), EmptyTileCount);
+	Csv += FString::Printf(TEXT("MinTileRatio,%.9f\n"), TileCount > 0 ? MinRatio : 1.0f);
+	Csv += FString::Printf(TEXT("MaxTileRatio,%.9f\n"), MaxRatio);
+	Csv += FString::Printf(TEXT("AvgTileRatio,%.9f\n"), AvgRatio);
+	Csv += FString::Printf(TEXT("WorstTileIndex,%d\n"), WorstTileIndex);
+	FFileHelper::SaveStringToFile(Csv, *FPaths::Combine(StatsDir, SafeName + TEXT("_TileStats.csv")));
+
+	const int32 TexelCount = Asset.Resolution.X * Asset.Resolution.Y;
+	TArray<FColor> PhysicalAtlasPreview;
+	TArray<FColor> PageTablePreview;
+	PhysicalAtlasPreview.SetNumUninitialized(TexelCount);
+	PageTablePreview.SetNumUninitialized(TexelCount);
+
+	for (int32 Y = 0; Y < Asset.Resolution.Y; ++Y)
+	{
+		for (int32 X = 0; X < Asset.Resolution.X; ++X)
+		{
+			const int32 TileX = X / Asset.TileSize;
+			const int32 TileY = Y / Asset.TileSize;
+			const int32 TileIndex = TileY * Asset.TileCount.X + TileX;
+			const int32 PixelIndex = Y * Asset.Resolution.X + X;
+			float Depth = 1.0f;
+			if (Asset.Tiles.IsValidIndex(TileIndex))
+			{
+				const FMHShadowTile& Tile = Asset.Tiles[TileIndex];
+				SampleRepresentativeDepthFromTile(Asset.Nodes, Tile, X - Tile.TexelRect.X, Y - Tile.TexelRect.Y, Asset.TileSize, Depth);
+				const uint8 R = static_cast<uint8>((Tile.TileCoord.X * 53) & 255);
+				const uint8 G = static_cast<uint8>((Tile.TileCoord.Y * 97) & 255);
+				const uint8 B = static_cast<uint8>((Tile.PageIndex * 29) & 255);
+				PageTablePreview[PixelIndex] = Tile.bResidentDefault ? FColor(R, G, B, 255) : FColor::Red;
+			}
+			else
+			{
+				PageTablePreview[PixelIndex] = FColor::Red;
+			}
+
+			const uint8 Gray = static_cast<uint8>(FMath::Clamp(Depth * 255.0f, 0.0f, 255.0f));
+			PhysicalAtlasPreview[PixelIndex] = FColor(Gray, Gray, Gray, 255);
+		}
+	}
+
+	SavePng(FPaths::Combine(StatsDir, SafeName + TEXT("_PhysicalAtlasPreview.png")), Asset.Resolution.X, Asset.Resolution.Y, PhysicalAtlasPreview);
+	SavePng(FPaths::Combine(StatsDir, SafeName + TEXT("_PageTablePreview.png")), Asset.Resolution.X, Asset.Resolution.Y, PageTablePreview);
+}
+
 static bool SaveShadowDataAsset(const FString& ObjectPath, UMHShadowDataAsset* Asset)
 {
 	const FString PackageName = FPackageName::ObjectPathToPackageName(ObjectPath);
@@ -647,6 +844,21 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 		return 1;
 	}
 
+	const int32 ImportTileSize = FMath::Max(1, FMath::RoundToInt(ParseFloatParam(Params, TEXT("TileSize="), 128.0f)));
+	if (!FMath::IsPowerOfTwo(ImportTileSize))
+	{
+		UE_LOG(LogTemp, Error, TEXT("LightmassDual tiled MH import requires power-of-two TileSize, got %d."), ImportTileSize);
+		return 1;
+	}
+	if ((FileData.ShadowMapSizeX % ImportTileSize) != 0 || (FileData.ShadowMapSizeY % ImportTileSize) != 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("LightmassDual tiled MH import requires resolution %dx%d to be divisible by TileSize=%d."),
+			FileData.ShadowMapSizeX,
+			FileData.ShadowMapSizeY,
+			ImportTileSize);
+		return 1;
+	}
+
 	const FString PackageName = FPackageName::ObjectPathToPackageName(OutputObjectPath);
 	const FString AssetName = GetAssetStemFromObjectPath(OutputObjectPath);
 	UPackage* Package = CreatePackage(*PackageName);
@@ -658,7 +870,8 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 	Asset->BakeSource = EMHShadowBakeSource::LightmassDual;
 	Asset->ProjectionMapping = EMHShadowProjectionMapping::LightmassWorldToShadowMatrix;
 	Asset->Resolution = FIntPoint(FileData.ShadowMapSizeX, FileData.ShadowMapSizeY);
-	Asset->TileSize = 128;
+	Asset->TileSize = ImportTileSize;
+	Asset->TileCount = FIntPoint(FileData.ShadowMapSizeX / ImportTileSize, FileData.ShadowMapSizeY / ImportTileSize);
 	Asset->DepthBias = ParseFloatParam(Params, TEXT("DepthBias="), 0.001f);
 	Asset->LightOrigin = FVector::ZeroVector;
 	Asset->LightXAxis = FVector::ForwardVector;
@@ -703,31 +916,107 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 	}
 	FileData.PairedTexelCount = PairedIntervalCount;
 
-	FMHShadowCompressionInput CompressionInput;
-	CompressionInput.Resolution = Asset->Resolution;
-	CompressionInput.TexelIntervals = Asset->RawIntervals;
+	Asset->Intervals.Reset();
+	Asset->Nodes.Reset();
+	Asset->Tiles.Reset();
+	Asset->PageTable.Reset();
+	Asset->Tiles.Reserve(Asset->TileCount.X * Asset->TileCount.Y);
+	Asset->PageTable.Reserve(Asset->TileCount.X * Asset->TileCount.Y);
 
-	FMHShadowCompressionOutput CompressionOutput;
-	FString CompressionError;
-	if (FMHShadowCompressor::Compress(CompressionInput, CompressionOutput, &CompressionError))
+	double TotalCompressionSeconds = 0.0;
+	int64 TotalCompressedBytes = 0;
+	bool bTileCompressionSucceeded = true;
+	for (int32 TileY = 0; TileY < Asset->TileCount.Y && bTileCompressionSucceeded; ++TileY)
 	{
-		Asset->Intervals = MoveTemp(CompressionOutput.Intervals);
-		Asset->Nodes = MoveTemp(CompressionOutput.Nodes);
-		Asset->Stats = CompressionOutput.Stats;
+		for (int32 TileX = 0; TileX < Asset->TileCount.X && bTileCompressionSucceeded; ++TileX)
+		{
+			FMHShadowCompressionInput TileInput;
+			TileInput.Resolution = FIntPoint(Asset->TileSize, Asset->TileSize);
+			TileInput.TexelIntervals.SetNumUninitialized(Asset->TileSize * Asset->TileSize);
+
+			int32 TileValidTexels = 0;
+			for (int32 LocalY = 0; LocalY < Asset->TileSize; ++LocalY)
+			{
+				const int32 SourceY = TileY * Asset->TileSize + LocalY;
+				for (int32 LocalX = 0; LocalX < Asset->TileSize; ++LocalX)
+				{
+					const int32 SourceX = TileX * Asset->TileSize + LocalX;
+					const int32 SourceIndex = SourceY * Asset->Resolution.X + SourceX;
+					const int32 LocalIndex = LocalY * Asset->TileSize + LocalX;
+					TileInput.TexelIntervals[LocalIndex] = Asset->RawIntervals[SourceIndex];
+					TileValidTexels += Asset->RawIntervals[SourceIndex].bValid ? 1 : 0;
+				}
+			}
+
+			FMHShadowCompressionOutput TileOutput;
+			FString CompressionError;
+			if (!FMHShadowCompressor::Compress(TileInput, TileOutput, &CompressionError))
+			{
+				UE_LOG(LogTemp, Error, TEXT("LightmassDual tile compression failed at tile=(%d,%d): %s"), TileX, TileY, *CompressionError);
+				bTileCompressionSucceeded = false;
+				break;
+			}
+
+			const int32 NodeOffset = Asset->Nodes.Num();
+			const int32 IntervalOffset = Asset->Intervals.Num();
+			for (FMHShadowNode Node : TileOutput.Nodes)
+			{
+				for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+				{
+					const int32 LocalChildIndex = GetChildIndex(Node.ChildIndices, ChildSlot);
+					SetChildIndex(Node.ChildIndices, ChildSlot, LocalChildIndex >= 0 ? LocalChildIndex + NodeOffset : INDEX_NONE);
+				}
+				if (Node.IntervalIndex >= 0)
+				{
+					Node.IntervalIndex += IntervalOffset;
+				}
+				Asset->Nodes.Add(Node);
+			}
+			Asset->Intervals.Append(TileOutput.Intervals);
+
+			const int32 TileIndex = TileY * Asset->TileCount.X + TileX;
+			FMHShadowTile Tile;
+			Tile.TileCoord = FIntPoint(TileX, TileY);
+			Tile.TexelRect = FIntVector4(
+				TileX * Asset->TileSize,
+				TileY * Asset->TileSize,
+				(TileX + 1) * Asset->TileSize,
+				(TileY + 1) * Asset->TileSize);
+			Tile.NodeOffset = NodeOffset;
+			Tile.NodeCount = TileOutput.Nodes.Num();
+			Tile.RootNodeIndex = NodeOffset;
+			Tile.PageIndex = TileIndex;
+			Tile.bResidentDefault = true;
+			Tile.RawTexelCount = Asset->TileSize * Asset->TileSize;
+			Tile.ValidTexelCount = TileValidTexels;
+			Tile.CompressedNodeCount = TileOutput.Nodes.Num();
+			Tile.CompressionRatio = TileOutput.Stats.CompressionRatio;
+			Asset->Tiles.Add(Tile);
+			Asset->PageTable.Add(Tile.PageIndex);
+
+			TotalCompressionSeconds += TileOutput.Stats.BakeSeconds;
+			TotalCompressedBytes += GetCompressedNodeBytes(TileOutput.Nodes.Num());
+		}
 	}
-	else
+
+	if (!bTileCompressionSucceeded)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("LightmassDual asset kept raw-only because MH compression was skipped: %s"), *CompressionError);
-		Asset->Intervals.Empty();
-		Asset->Nodes.Empty();
-		Asset->Stats.RawTexelCount = ExpectedTexelCount;
-		Asset->Stats.ValidTexelCount = ValidIntervalCount;
-		Asset->Stats.NodeCount = 0;
-		Asset->Stats.IntervalCount = 0;
-		Asset->Stats.RawBytes = static_cast<int64>(ExpectedTexelCount) * static_cast<int64>(sizeof(float) * 2 + sizeof(uint8));
-		Asset->Stats.CompressedBytes = 0;
-		Asset->Stats.CompressionRatio = 0.0f;
+		return 1;
 	}
+
+	Asset->Stats.RawTexelCount = ExpectedTexelCount;
+	Asset->Stats.ValidTexelCount = ValidIntervalCount;
+	Asset->Stats.NodeCount = Asset->Nodes.Num();
+	Asset->Stats.IntervalCount = Asset->Intervals.Num();
+	Asset->Stats.RawBytes = static_cast<int64>(ExpectedTexelCount) * static_cast<int64>(sizeof(float) * 2);
+	Asset->Stats.CompressedBytes =
+		TotalCompressedBytes
+		+ static_cast<int64>(Asset->Tiles.Num()) * static_cast<int64>(sizeof(FMHShadowTile))
+		+ static_cast<int64>(Asset->PageTable.Num()) * static_cast<int64>(sizeof(int32));
+	Asset->Stats.CompressionRatio = Asset->Stats.RawBytes > 0
+		? static_cast<float>(static_cast<double>(Asset->Stats.CompressedBytes) / static_cast<double>(Asset->Stats.RawBytes))
+		: 1.0f;
+	Asset->Stats.BakeSeconds = TotalCompressionSeconds;
 	Asset->Stats.BakeSeconds = FileData.BakeSeconds;
 
 	Package->MarkPackageDirty();
@@ -742,14 +1031,19 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 	WriteLightmassDualStatsCsv(OutputObjectPath, FileData, *Asset, LightGuid, FilePath);
 	WriteLightmassDualDepthStatsCsv(OutputObjectPath, Asset->RawIntervals, Asset->RawIntervalFlags);
 	WriteLightmassDualHitSequenceCsv(OutputObjectPath, DebugRays, DebugHits);
+	BuildLightmassDualTileData(OutputObjectPath, *Asset);
 
-	UE_LOG(LogTemp, Display, TEXT("Imported LightmassDual MH shadow asset: %s Source=%s Resolution=%dx%d Valid=%d Nodes=%d Flags Paired=%d Thin=%d Unpaired=%d MultiHit=%d DebugRays=%d DebugHits=%d"),
+	UE_LOG(LogTemp, Display, TEXT("Imported LightmassDual MH shadow asset: %s Source=%s Resolution=%dx%d TileSize=%d Tiles=%dx%d Valid=%d Nodes=%d Ratio=%.6f Flags Paired=%d Thin=%d Unpaired=%d MultiHit=%d DebugRays=%d DebugHits=%d"),
 		*OutputObjectPath,
 		*FilePath,
 		Asset->Resolution.X,
 		Asset->Resolution.Y,
+		Asset->TileSize,
+		Asset->TileCount.X,
+		Asset->TileCount.Y,
 		Asset->Stats.ValidTexelCount,
 		Asset->Stats.NodeCount,
+		Asset->Stats.CompressionRatio,
 		FileData.PairedTexelCount,
 		FileData.ThinFallbackTexelCount,
 		FileData.UnpairedTexelCount,

@@ -47,19 +47,50 @@ static int32 GetChildIndex(const FIntVector4& ChildIndices, int32 ChildSlot)
 static bool SampleRepresentativeDepth(const UMHShadowDataAsset& Asset, int32 X, int32 Y, float& OutDepth)
 {
 	OutDepth = 1.0f;
-	if (!Asset.Nodes.IsValidIndex(0) || Asset.Resolution.X <= 0 || Asset.Resolution.Y <= 0)
+	if (Asset.Nodes.Num() == 0 || Asset.Resolution.X <= 0 || Asset.Resolution.Y <= 0)
 	{
 		return false;
 	}
 
+	const bool bUseTiledData = Asset.TileSize > 0
+		&& Asset.TileCount.X > 0
+		&& Asset.TileCount.Y > 0
+		&& Asset.Tiles.Num() == Asset.TileCount.X * Asset.TileCount.Y;
+
 	int32 NodeIndex = 0;
 	FIntPoint NodeMin(0, 0);
 	int32 NodeSize = Asset.Resolution.X;
+	int32 NodeOffset = 0;
+	int32 NodeCount = Asset.Nodes.Num();
+	if (bUseTiledData)
+	{
+		const int32 TileX = X / Asset.TileSize;
+		const int32 TileY = Y / Asset.TileSize;
+		const int32 TileIndex = TileY * Asset.TileCount.X + TileX;
+		if (!Asset.Tiles.IsValidIndex(TileIndex))
+		{
+			return false;
+		}
+
+		const FMHShadowTile& Tile = Asset.Tiles[TileIndex];
+		NodeIndex = Tile.RootNodeIndex;
+		NodeSize = Asset.TileSize;
+		NodeOffset = Tile.NodeOffset;
+		NodeCount = Tile.NodeCount;
+		X -= Tile.TexelRect.X;
+		Y -= Tile.TexelRect.Y;
+	}
+
+	if (!Asset.Nodes.IsValidIndex(NodeIndex))
+	{
+		return false;
+	}
+
 	bool bHasDepth = false;
 
 	for (int32 Step = 0; Step < 32; ++Step)
 	{
-		if (!Asset.Nodes.IsValidIndex(NodeIndex))
+		if (!Asset.Nodes.IsValidIndex(NodeIndex) || NodeIndex < NodeOffset || NodeIndex >= NodeOffset + NodeCount)
 		{
 			return bHasDepth;
 		}
@@ -85,7 +116,7 @@ static bool SampleRepresentativeDepth(const UMHShadowDataAsset& Asset, int32 X, 
 		const int32 ChildY = (Y - NodeMin.Y) >= ChildSize ? 1 : 0;
 		const int32 ChildSlot = ChildY * 2 + ChildX;
 		const int32 ChildNodeIndex = GetChildIndex(Node.ChildIndices, ChildSlot);
-		if (ChildNodeIndex < 0)
+		if (ChildNodeIndex < NodeOffset || ChildNodeIndex >= NodeOffset + NodeCount)
 		{
 			return bHasDepth;
 		}
@@ -105,6 +136,16 @@ static FString GetValidationOutputDir()
 	IFileManager::Get().MakeDirectory(*OutputDir, true);
 	return OutputDir;
 }
+
+struct FTileValidationStats
+{
+	int32 RawTexels = 0;
+	int32 ValidTexels = 0;
+	int32 EmptyTexels = 0;
+	int32 RepresentedTexels = 0;
+	int32 MissingTexels = 0;
+	int32 MismatchTexels = 0;
+};
 }
 
 UMHShadowValidateCompressionCommandlet::UMHShadowValidateCompressionCommandlet()
@@ -128,7 +169,11 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 	}
 
 	const int32 ExpectedTexelCount = Asset->Resolution.X * Asset->Resolution.Y;
-	if (Asset->RawIntervals.Num() != ExpectedTexelCount || Asset->Resolution.X <= 0 || Asset->Resolution.X != Asset->Resolution.Y)
+	const bool bHasTiledData = Asset->TileSize > 0
+		&& Asset->TileCount.X > 0
+		&& Asset->TileCount.Y > 0
+		&& Asset->Tiles.Num() == Asset->TileCount.X * Asset->TileCount.Y;
+	if (Asset->RawIntervals.Num() != ExpectedTexelCount || Asset->Resolution.X <= 0 || Asset->Resolution.Y <= 0 || (!bHasTiledData && Asset->Resolution.X != Asset->Resolution.Y))
 	{
 		UE_LOG(LogTemp, Error, TEXT("Invalid MH shadow asset for compression validation: %s resolution=%dx%d rawIntervals=%d expected=%d"),
 			*AssetPath,
@@ -149,6 +194,11 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 	float MaxShrink = 0.0f;
 	TArray<FString> ErrorRows;
 	ErrorRows.Reserve(64);
+	TArray<FTileValidationStats> TileStats;
+	if (bHasTiledData)
+	{
+		TileStats.SetNum(Asset->Tiles.Num());
+	}
 
 	for (int32 Y = 0; Y < Asset->Resolution.Y; ++Y)
 	{
@@ -161,11 +211,29 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 
 			ValidRawTexels += RawInterval.bValid ? 1 : 0;
 			EmptyRawTexels += RawInterval.bValid ? 0 : 1;
+			FTileValidationStats* CurrentTileStats = nullptr;
+			if (bHasTiledData)
+			{
+				const int32 TileX = X / Asset->TileSize;
+				const int32 TileY = Y / Asset->TileSize;
+				const int32 TileIndex = TileY * Asset->TileCount.X + TileX;
+				CurrentTileStats = TileStats.IsValidIndex(TileIndex) ? &TileStats[TileIndex] : nullptr;
+				if (CurrentTileStats)
+				{
+					++CurrentTileStats->RawTexels;
+					CurrentTileStats->ValidTexels += RawInterval.bValid ? 1 : 0;
+					CurrentTileStats->EmptyTexels += RawInterval.bValid ? 0 : 1;
+				}
+			}
 
 			float RepresentativeDepth = 1.0f;
 			if (!SampleRepresentativeDepth(*Asset, X, Y, RepresentativeDepth))
 			{
 				++MissingTexels;
+				if (CurrentTileStats)
+				{
+					++CurrentTileStats->MissingTexels;
+				}
 				if (ErrorRows.Num() < 64)
 				{
 					ErrorRows.Add(FString::Printf(TEXT("Missing,%d,%d,%d,%.9f,%.9f,NaN"), X, Y, TexelIndex, ExpectedMin, ExpectedMax));
@@ -177,6 +245,10 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 			if (!bInsideInterval)
 			{
 				++MismatchTexels;
+				if (CurrentTileStats)
+				{
+					++CurrentTileStats->MismatchTexels;
+				}
 				if (ErrorRows.Num() < 64)
 				{
 					ErrorRows.Add(FString::Printf(TEXT("Mismatch,%d,%d,%d,%.9f,%.9f,%.9f"), X, Y, TexelIndex, ExpectedMin, ExpectedMax, RepresentativeDepth));
@@ -185,6 +257,10 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 			}
 
 			++RepresentedTexels;
+			if (CurrentTileStats)
+			{
+				++CurrentTileStats->RepresentedTexels;
+			}
 			if (RawInterval.bValid)
 			{
 				const float IntervalWidth = FMath::Max(0.0f, ExpectedMax - ExpectedMin);
@@ -211,6 +287,8 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 	Csv += FString::Printf(TEXT("RawBytes,%lld\n"), Asset->Stats.RawBytes);
 	Csv += FString::Printf(TEXT("CompressedBytes,%lld\n"), Asset->Stats.CompressedBytes);
 	Csv += FString::Printf(TEXT("CompressionRatio,%.9f\n"), Asset->Stats.CompressionRatio);
+	Csv += FString::Printf(TEXT("TileSize,%d\n"), Asset->TileSize);
+	Csv += FString::Printf(TEXT("TileCount,%dx%d\n"), Asset->TileCount.X, Asset->TileCount.Y);
 	Csv += FString::Printf(TEXT("AverageShrink,%.9f\n"), ValidRawTexels > 0 ? ShrinkSum / static_cast<double>(ValidRawTexels) : 0.0);
 	Csv += FString::Printf(TEXT("MaxShrink,%.9f\n"), MaxShrink);
 	Csv += TEXT("\nErrorType,X,Y,TexelIndex,ExpectedMin,ExpectedMax,RepresentativeDepth\n");
@@ -224,17 +302,59 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 	const FString CsvPath = FPaths::Combine(GetValidationOutputDir(), SafeName + TEXT("_CompressionValidation.csv"));
 	FFileHelper::SaveStringToFile(Csv, *CsvPath);
 
+	int32 WorstTileIndex = INDEX_NONE;
+	int32 WorstTileMismatch = 0;
+	FString TileCsv;
+	TileCsv += TEXT("TileIndex,TileX,TileY,PageIndex,NodeOffset,NodeCount,RawTexels,ValidTexels,EmptyTexels,RepresentedTexels,MissingTexels,MismatchTexels,CompressionRatio\n");
+	if (bHasTiledData)
+	{
+		for (int32 TileIndex = 0; TileIndex < Asset->Tiles.Num(); ++TileIndex)
+		{
+			const FMHShadowTile& Tile = Asset->Tiles[TileIndex];
+			const FTileValidationStats& Stats = TileStats[TileIndex];
+			if (Stats.MismatchTexels > WorstTileMismatch)
+			{
+				WorstTileMismatch = Stats.MismatchTexels;
+				WorstTileIndex = TileIndex;
+			}
+
+			TileCsv += FString::Printf(
+				TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.9f\n"),
+				TileIndex,
+				Tile.TileCoord.X,
+				Tile.TileCoord.Y,
+				Tile.PageIndex,
+				Tile.NodeOffset,
+				Tile.NodeCount,
+				Stats.RawTexels,
+				Stats.ValidTexels,
+				Stats.EmptyTexels,
+				Stats.RepresentedTexels,
+				Stats.MissingTexels,
+				Stats.MismatchTexels,
+				Tile.CompressionRatio);
+		}
+	}
+	const FString TileCsvPath = FPaths::Combine(GetValidationOutputDir(), SafeName + TEXT("_TileCompressionValidation.csv"));
+	FFileHelper::SaveStringToFile(TileCsv, *TileCsvPath);
+
 	UE_LOG(LogTemp, Display, TEXT("MH compression validation: %s"), *AssetPath);
-	UE_LOG(LogTemp, Display, TEXT("RawTexels=%d Valid=%d Empty=%d Represented=%d Missing=%d Mismatch=%d Nodes=%d Ratio=%.6f"),
+	UE_LOG(LogTemp, Display, TEXT("RawTexels=%d Valid=%d Empty=%d Represented=%d Missing=%d Mismatch=%d Tiles=%dx%d Nodes=%d Ratio=%.6f"),
 		ExpectedTexelCount,
 		ValidRawTexels,
 		EmptyRawTexels,
 		RepresentedTexels,
 		MissingTexels,
 		MismatchTexels,
+		Asset->TileCount.X,
+		Asset->TileCount.Y,
 		Asset->Nodes.Num(),
 		Asset->Stats.CompressionRatio);
 	UE_LOG(LogTemp, Display, TEXT("Compression validation CSV: %s"), *CsvPath);
+	UE_LOG(LogTemp, Display, TEXT("Tile compression validation CSV: %s WorstTile=%d WorstTileMismatch=%d"),
+		*TileCsvPath,
+		WorstTileIndex,
+		WorstTileMismatch);
 
 	if (MissingTexels != 0 || MismatchTexels != 0 || Asset->Stats.CompressionRatio >= 1.0f)
 	{

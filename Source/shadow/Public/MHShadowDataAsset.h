@@ -25,6 +25,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	int32 TileSize = 128;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Tiles")
+	FIntPoint TileCount = FIntPoint::ZeroValue;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	float DepthBias = 5.0f;
 
@@ -75,6 +78,12 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	TArray<FMHShadowNode> Nodes;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Tiles")
+	TArray<FMHShadowTile> Tiles;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Tiles")
+	TArray<int32> PageTable;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	FMHShadowBakeStats Stats;

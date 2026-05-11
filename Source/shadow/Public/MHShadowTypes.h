@@ -63,6 +63,45 @@ struct FMHShadowNode
 };
 
 USTRUCT(BlueprintType)
+struct FMHShadowTile
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	FIntPoint TileCoord = FIntPoint::ZeroValue;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	FIntVector4 TexelRect = FIntVector4(0, 0, 0, 0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	int32 NodeOffset = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	int32 NodeCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	int32 RootNodeIndex = INDEX_NONE;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	int32 PageIndex = INDEX_NONE;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
+	bool bResidentDefault = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Stats")
+	int32 RawTexelCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Stats")
+	int32 ValidTexelCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Stats")
+	int32 CompressedNodeCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Stats")
+	float CompressionRatio = 1.0f;
+};
+
+USTRUCT(BlueprintType)
 struct FMHShadowBakeStats
 {
 	GENERATED_BODY()

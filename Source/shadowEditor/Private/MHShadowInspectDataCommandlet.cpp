@@ -59,6 +59,11 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 	int32 UnpairedIntervals = 0;
 	int32 MultiHitIntervals = 0;
 	int32 PairedIntervals = 0;
+	int32 EmptyTiles = 0;
+	int32 WorstTileIndex = INDEX_NONE;
+	float MinTileRatio = TNumericLimits<float>::Max();
+	float MaxTileRatio = 0.0f;
+	double TileRatioSum = 0.0;
 	float MaxThickness = 0.0f;
 	double ThicknessSum = 0.0;
 	for (const FColor& Color : Asset->DebugIntervalPreview)
@@ -91,8 +96,25 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 		UnpairedIntervals += (Flags & (1 << 2)) != 0 ? 1 : 0;
 		MultiHitIntervals += (Flags & (1 << 3)) != 0 ? 1 : 0;
 	}
+	for (int32 TileIndex = 0; TileIndex < Asset->Tiles.Num(); ++TileIndex)
+	{
+		const FMHShadowTile& Tile = Asset->Tiles[TileIndex];
+		EmptyTiles += Tile.ValidTexelCount == 0 ? 1 : 0;
+		MinTileRatio = FMath::Min(MinTileRatio, Tile.CompressionRatio);
+		if (Tile.CompressionRatio > MaxTileRatio)
+		{
+			MaxTileRatio = Tile.CompressionRatio;
+			WorstTileIndex = TileIndex;
+		}
+		TileRatioSum += Tile.CompressionRatio;
+	}
+	const float AvgTileRatio = Asset->Tiles.Num() > 0 ? static_cast<float>(TileRatioSum / static_cast<double>(Asset->Tiles.Num())) : 0.0f;
 
 	bool bOk = true;
+	const bool bHasTiledData = Asset->TileCount.X > 0
+		&& Asset->TileCount.Y > 0
+		&& Asset->Tiles.Num() == Asset->TileCount.X * Asset->TileCount.Y
+		&& Asset->PageTable.Num() == Asset->Tiles.Num();
 	bOk &= Asset->IsValidForRendering();
 	bOk &= Asset->Resolution.X > 0 && Asset->Resolution.Y > 0;
 	bOk &= Asset->Stats.RawTexelCount == ExpectedPreviewPixels;
@@ -110,6 +132,13 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 	bOk &= Asset->LightSpaceMax.X > Asset->LightSpaceMin.X;
 	bOk &= Asset->LightSpaceMax.Y > Asset->LightSpaceMin.Y;
 	bOk &= Asset->MaxLightDepth > Asset->MinLightDepth;
+	if (Asset->BakeSource == EMHShadowBakeSource::LightmassDual)
+	{
+		bOk &= bHasTiledData;
+		bOk &= Asset->TileSize > 0;
+		bOk &= (Asset->Resolution.X % Asset->TileSize) == 0;
+		bOk &= (Asset->Resolution.Y % Asset->TileSize) == 0;
+	}
 	if (Expectation.Equals(TEXT("ClosedCube"), ESearchCase::IgnoreCase))
 	{
 		bOk &= ValidRawIntervals > 0;
@@ -149,6 +178,17 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 		ThinFallbackIntervals,
 		UnpairedIntervals,
 		MultiHitIntervals);
+	UE_LOG(LogTemp, Display, TEXT("Tiles=%dx%d TileSize=%d TileAssets=%d PageTable=%d EmptyTiles=%d TileRatio[min=%.6f avg=%.6f max=%.6f worst=%d]"),
+		Asset->TileCount.X,
+		Asset->TileCount.Y,
+		Asset->TileSize,
+		Asset->Tiles.Num(),
+		Asset->PageTable.Num(),
+		EmptyTiles,
+		Asset->Tiles.Num() > 0 ? MinTileRatio : 0.0f,
+		AvgTileRatio,
+		MaxTileRatio,
+		WorstTileIndex);
 	if (Expectation.Equals(TEXT("ClosedCube"), ESearchCase::IgnoreCase))
 	{
 		UE_LOG(LogTemp, Display, TEXT("ClosedCube expectation: Empty=%d Paired=%d ThinFallback=%d Valid=%d MaxThickness=%.6f"),
