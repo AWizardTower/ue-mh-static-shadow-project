@@ -136,9 +136,69 @@ void UMHShadowComponent::RegisterShadowData()
 
 	RenderData.PageTable = ShadowData->PageTable;
 
+	RenderData.ClipmapRawIntervals.Reserve(ShadowData->ClipmapRawIntervals.Num());
+	for (int32 IntervalIndex = 0; IntervalIndex < ShadowData->ClipmapRawIntervals.Num(); ++IntervalIndex)
+	{
+		const FMHShadowDepthInterval& Interval = ShadowData->ClipmapRawIntervals[IntervalIndex];
+		RenderData.ClipmapRawIntervals.Add(FVector4f(Interval.MinDepth, Interval.MaxDepth, Interval.bValid ? 1.0f : 0.0f, 0.0f));
+	}
+
+	RenderData.ClipmapNodes.Reserve(ShadowData->ClipmapNodes.Num());
+	for (const FMHShadowNode& Node : ShadowData->ClipmapNodes)
+	{
+		UE::Renderer::MHStaticShadow::FShadowNode RenderNode;
+		RenderNode.ChildIndices = Node.ChildIndices;
+		RenderNode.IntervalAndFlags = FVector4f(
+			Node.BoundsMinDepth,
+			Node.BoundsMaxDepth,
+			Node.bHasRepresentativeDepth ? 1.0f : 0.0f,
+			0.0f);
+		RenderNode.RepresentativeAndBounds = FVector4f(
+			Node.RepresentativeDepth,
+			Node.BoundsMinDepth,
+			Node.BoundsMaxDepth,
+			Node.bHasRepresentativeDepth ? 1.0f : 0.0f);
+		RenderData.ClipmapNodes.Add(RenderNode);
+	}
+
+	RenderData.ClipmapTiles.Reserve(ShadowData->ClipmapTiles.Num());
+	for (const FMHShadowTile& Tile : ShadowData->ClipmapTiles)
+	{
+		UE::Renderer::MHStaticShadow::FShadowTile RenderTile;
+		RenderTile.TexelRect = Tile.TexelRect;
+		RenderTile.NodeAndPage = FIntVector4(Tile.NodeOffset, Tile.NodeCount, Tile.RootNodeIndex, Tile.PageIndex);
+		RenderTile.CoordAndFlags = FIntVector4(Tile.TileCoord.X, Tile.TileCoord.Y, Tile.bResidentDefault ? 1 : 0, 0);
+		RenderTile.Stats = FVector4f(
+			static_cast<float>(Tile.RawTexelCount),
+			static_cast<float>(Tile.ValidTexelCount),
+			Tile.CompressionRatio,
+			static_cast<float>(Tile.CompressedNodeCount));
+		RenderData.ClipmapTiles.Add(RenderTile);
+	}
+
+	RenderData.ClipmapPageTable = ShadowData->ClipmapPageTable;
+	RenderData.ClipmapLevels.Reserve(ShadowData->ClipmapLevels.Num());
+	for (const FMHShadowClipmapLevel& Level : ShadowData->ClipmapLevels)
+	{
+		UE::Renderer::MHStaticShadow::FShadowClipmapLevel RenderLevel;
+		RenderLevel.ResolutionTileSizeLevel = FIntVector4(Level.Resolution.X, Level.Resolution.Y, Level.TileSize, Level.LevelIndex);
+		RenderLevel.TileCountAndOffset = FIntVector4(Level.TileCount.X, Level.TileCount.Y, Level.TileOffset, Level.TileDataCount);
+		RenderLevel.PageTableAndNodeOffset = FIntVector4(Level.PageTableOffset, Level.PageTableCount, Level.NodeOffset, Level.NodeCount);
+		RenderLevel.TexelWorldSizeAndPadding = FVector4f(
+			static_cast<float>(Level.TexelWorldSize.X),
+			static_cast<float>(Level.TexelWorldSize.Y),
+			0.0f,
+			0.0f);
+		RenderLevel.WorldToShadowRow0 = FVector4f(Level.WorldToShadowRow0.X, Level.WorldToShadowRow0.Y, Level.WorldToShadowRow0.Z, Level.WorldToShadowRow0.W);
+		RenderLevel.WorldToShadowRow1 = FVector4f(Level.WorldToShadowRow1.X, Level.WorldToShadowRow1.Y, Level.WorldToShadowRow1.Z, Level.WorldToShadowRow1.W);
+		RenderLevel.WorldToShadowRow2 = FVector4f(Level.WorldToShadowRow2.X, Level.WorldToShadowRow2.Y, Level.WorldToShadowRow2.Z, Level.WorldToShadowRow2.W);
+		RenderLevel.WorldToShadowRow3 = FVector4f(Level.WorldToShadowRow3.X, Level.WorldToShadowRow3.Y, Level.WorldToShadowRow3.Z, Level.WorldToShadowRow3.W);
+		RenderData.ClipmapLevels.Add(RenderLevel);
+	}
+
 	UE::Renderer::MHStaticShadow::RegisterOrUpdateShadowData(RenderData);
 	bRegisteredWithRenderer = true;
-	UE_LOG(LogTemp, Display, TEXT("MHShadowComponent registered ShadowData component=%s asset=%s resolution=%dx%d tiles=%dx%d nodes=%d rawIntervals=%d"),
+	UE_LOG(LogTemp, Display, TEXT("MHShadowComponent registered ShadowData component=%s asset=%s resolution=%dx%d tiles=%dx%d nodes=%d rawIntervals=%d clipmapLevels=%d clipmapTiles=%d clipmapNodes=%d"),
 		*GetPathName(),
 		*ShadowData->GetPathName(),
 		ShadowData->Resolution.X,
@@ -146,7 +206,10 @@ void UMHShadowComponent::RegisterShadowData()
 		ShadowData->TileCount.X,
 		ShadowData->TileCount.Y,
 		ShadowData->Nodes.Num(),
-		ShadowData->RawIntervals.Num());
+		ShadowData->RawIntervals.Num(),
+		ShadowData->ClipmapLevels.Num(),
+		ShadowData->ClipmapTiles.Num(),
+		ShadowData->ClipmapNodes.Num());
 #else
 	bRegisteredWithRenderer = false;
 	UE_LOG(LogTemp, Warning, TEXT("MHShadowComponent renderer bridge is not available for component=%s"), *GetPathName());

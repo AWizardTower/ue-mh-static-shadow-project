@@ -628,6 +628,191 @@ static int64 GetCompressedNodeBytes(int32 NodeCount)
 	return static_cast<int64>(NodeCount) * static_cast<int64>(sizeof(int32) * 4 + sizeof(float) * 3 + sizeof(uint32));
 }
 
+static TArray<FMHShadowDepthInterval> DownsampleIntervals2x(
+	const TArray<FMHShadowDepthInterval>& SourceIntervals,
+	FIntPoint SourceResolution,
+	FIntPoint& OutResolution)
+{
+	OutResolution = FIntPoint(SourceResolution.X / 2, SourceResolution.Y / 2);
+	TArray<FMHShadowDepthInterval> Downsampled;
+	Downsampled.SetNum(OutResolution.X * OutResolution.Y);
+
+	for (int32 Y = 0; Y < OutResolution.Y; ++Y)
+	{
+		for (int32 X = 0; X < OutResolution.X; ++X)
+		{
+			FMHShadowDepthInterval& Out = Downsampled[Y * OutResolution.X + X];
+			bool bAnyValid = false;
+			float MinDepth = 1.0f;
+			float MaxDepth = 0.0f;
+			for (int32 OffsetY = 0; OffsetY < 2; ++OffsetY)
+			{
+				for (int32 OffsetX = 0; OffsetX < 2; ++OffsetX)
+				{
+					const int32 SourceX = X * 2 + OffsetX;
+					const int32 SourceY = Y * 2 + OffsetY;
+					const int32 SourceIndex = SourceY * SourceResolution.X + SourceX;
+					if (!SourceIntervals.IsValidIndex(SourceIndex) || !SourceIntervals[SourceIndex].bValid)
+					{
+						continue;
+					}
+
+					bAnyValid = true;
+					MinDepth = FMath::Min(MinDepth, SourceIntervals[SourceIndex].MinDepth);
+					MaxDepth = FMath::Max(MaxDepth, SourceIntervals[SourceIndex].MaxDepth);
+				}
+			}
+
+			Out.MinDepth = bAnyValid ? MinDepth : 1.0f;
+			Out.MaxDepth = bAnyValid ? MaxDepth : 1.0f;
+			Out.bValid = bAnyValid;
+		}
+	}
+
+	return Downsampled;
+}
+
+static bool AppendCompressedClipmapLevel(
+	UMHShadowDataAsset& Asset,
+	const TArray<FMHShadowDepthInterval>& LevelIntervals,
+	FIntPoint LevelResolution,
+	int32 LevelIndex,
+	int32 TileSize,
+	FVector2D TexelWorldSize,
+	double& InOutCompressionSeconds,
+	int64& InOutCompressedBytes)
+{
+	if (LevelResolution.X <= 0 || LevelResolution.Y <= 0 || TileSize <= 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Invalid clipmap level %d resolution=%dx%d tileSize=%d."),
+			LevelIndex,
+			LevelResolution.X,
+			LevelResolution.Y,
+			TileSize);
+		return false;
+	}
+	if ((LevelResolution.X % TileSize) != 0 || (LevelResolution.Y % TileSize) != 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Clipmap level %d resolution=%dx%d must be divisible by TileSize=%d."),
+			LevelIndex,
+			LevelResolution.X,
+			LevelResolution.Y,
+			TileSize);
+		return false;
+	}
+	if (LevelIntervals.Num() != LevelResolution.X * LevelResolution.Y)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Clipmap level %d expected %d intervals, got %d."),
+			LevelIndex,
+			LevelResolution.X * LevelResolution.Y,
+			LevelIntervals.Num());
+		return false;
+	}
+
+	FMHShadowClipmapLevel Level;
+	Level.LevelIndex = LevelIndex;
+	Level.Resolution = LevelResolution;
+	Level.TileSize = TileSize;
+	Level.TileCount = FIntPoint(LevelResolution.X / TileSize, LevelResolution.Y / TileSize);
+	Level.RawIntervalOffset = Asset.ClipmapRawIntervals.Num();
+	Level.RawIntervalCount = LevelIntervals.Num();
+	Level.TileOffset = Asset.ClipmapTiles.Num();
+	Level.TileDataCount = Level.TileCount.X * Level.TileCount.Y;
+	Level.PageTableOffset = Asset.ClipmapPageTable.Num();
+	Level.PageTableCount = Level.TileDataCount;
+	Level.NodeOffset = Asset.ClipmapNodes.Num();
+	Level.TexelWorldSize = TexelWorldSize;
+	Level.WorldToShadowRow0 = Asset.WorldToShadowRow0;
+	Level.WorldToShadowRow1 = Asset.WorldToShadowRow1;
+	Level.WorldToShadowRow2 = Asset.WorldToShadowRow2;
+	Level.WorldToShadowRow3 = Asset.WorldToShadowRow3;
+
+	Asset.ClipmapRawIntervals.Append(LevelIntervals);
+	Asset.ClipmapTiles.Reserve(Asset.ClipmapTiles.Num() + Level.TileDataCount);
+	Asset.ClipmapPageTable.Reserve(Asset.ClipmapPageTable.Num() + Level.TileDataCount);
+
+	for (int32 TileY = 0; TileY < Level.TileCount.Y; ++TileY)
+	{
+		for (int32 TileX = 0; TileX < Level.TileCount.X; ++TileX)
+		{
+			FMHShadowCompressionInput TileInput;
+			TileInput.Resolution = FIntPoint(TileSize, TileSize);
+			TileInput.TexelIntervals.SetNumUninitialized(TileSize * TileSize);
+
+			int32 TileValidTexels = 0;
+			for (int32 LocalY = 0; LocalY < TileSize; ++LocalY)
+			{
+				const int32 SourceY = TileY * TileSize + LocalY;
+				for (int32 LocalX = 0; LocalX < TileSize; ++LocalX)
+				{
+					const int32 SourceX = TileX * TileSize + LocalX;
+					const int32 SourceIndex = SourceY * LevelResolution.X + SourceX;
+					const int32 LocalIndex = LocalY * TileSize + LocalX;
+					TileInput.TexelIntervals[LocalIndex] = LevelIntervals[SourceIndex];
+					TileValidTexels += LevelIntervals[SourceIndex].bValid ? 1 : 0;
+				}
+			}
+
+			FMHShadowCompressionOutput TileOutput;
+			FString CompressionError;
+			if (!FMHShadowCompressor::Compress(TileInput, TileOutput, &CompressionError))
+			{
+				UE_LOG(LogTemp, Error, TEXT("Clipmap level %d tile compression failed at tile=(%d,%d): %s"),
+					LevelIndex,
+					TileX,
+					TileY,
+					*CompressionError);
+				return false;
+			}
+
+			const int32 NodeOffset = Asset.ClipmapNodes.Num();
+			const int32 IntervalOffset = Asset.Intervals.Num();
+			for (FMHShadowNode Node : TileOutput.Nodes)
+			{
+				for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+				{
+					const int32 LocalChildIndex = GetChildIndex(Node.ChildIndices, ChildSlot);
+					SetChildIndex(Node.ChildIndices, ChildSlot, LocalChildIndex >= 0 ? LocalChildIndex + NodeOffset : INDEX_NONE);
+				}
+				if (Node.IntervalIndex >= 0)
+				{
+					Node.IntervalIndex += IntervalOffset;
+				}
+				Asset.ClipmapNodes.Add(Node);
+			}
+			Asset.Intervals.Append(TileOutput.Intervals);
+
+			const int32 LocalTileIndex = TileY * Level.TileCount.X + TileX;
+			const int32 GlobalTileIndex = Level.TileOffset + LocalTileIndex;
+			FMHShadowTile Tile;
+			Tile.TileCoord = FIntPoint(TileX, TileY);
+			Tile.TexelRect = FIntVector4(
+				TileX * TileSize,
+				TileY * TileSize,
+				(TileX + 1) * TileSize,
+				(TileY + 1) * TileSize);
+			Tile.NodeOffset = NodeOffset;
+			Tile.NodeCount = TileOutput.Nodes.Num();
+			Tile.RootNodeIndex = NodeOffset;
+			Tile.PageIndex = GlobalTileIndex;
+			Tile.bResidentDefault = true;
+			Tile.RawTexelCount = TileSize * TileSize;
+			Tile.ValidTexelCount = TileValidTexels;
+			Tile.CompressedNodeCount = TileOutput.Nodes.Num();
+			Tile.CompressionRatio = TileOutput.Stats.CompressionRatio;
+			Asset.ClipmapTiles.Add(Tile);
+			Asset.ClipmapPageTable.Add(GlobalTileIndex);
+
+			InOutCompressionSeconds += TileOutput.Stats.BakeSeconds;
+			InOutCompressedBytes += GetCompressedNodeBytes(TileOutput.Nodes.Num());
+		}
+	}
+
+	Level.NodeCount = Asset.ClipmapNodes.Num() - Level.NodeOffset;
+	Asset.ClipmapLevels.Add(Level);
+	return true;
+}
+
 static bool SampleRepresentativeDepthFromTile(
 	const TArray<FMHShadowNode>& Nodes,
 	const FMHShadowTile& Tile,
@@ -1019,6 +1204,59 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 	Asset->Stats.BakeSeconds = TotalCompressionSeconds;
 	Asset->Stats.BakeSeconds = FileData.BakeSeconds;
 
+	const int32 RequestedClipmapLevels = FMath::Clamp(FMath::RoundToInt(ParseFloatParam(Params, TEXT("ClipmapLevels="), 1.0f)), 0, 8);
+	const bool bDeriveClipmapLevels = FMath::RoundToInt(ParseFloatParam(Params, TEXT("ClipmapDerived="), 1.0f)) != 0;
+	Asset->ClipmapLevels.Reset();
+	Asset->ClipmapRawIntervals.Reset();
+	Asset->ClipmapNodes.Reset();
+	Asset->ClipmapTiles.Reset();
+	Asset->ClipmapPageTable.Reset();
+	if (RequestedClipmapLevels > 0)
+	{
+		TArray<FMHShadowDepthInterval> LevelIntervals = Asset->RawIntervals;
+		FIntPoint LevelResolution = Asset->Resolution;
+		double ClipmapCompressionSeconds = 0.0;
+		int64 ClipmapCompressedBytes = 0;
+		for (int32 LevelIndex = 0; LevelIndex < RequestedClipmapLevels; ++LevelIndex)
+		{
+			if (LevelIndex > 0)
+			{
+				if (!bDeriveClipmapLevels || LevelResolution.X < ImportTileSize * 2 || LevelResolution.Y < ImportTileSize * 2)
+				{
+					break;
+				}
+
+				FIntPoint DownsampledResolution;
+				LevelIntervals = DownsampleIntervals2x(LevelIntervals, LevelResolution, DownsampledResolution);
+				LevelResolution = DownsampledResolution;
+			}
+
+			const float TexelScale = static_cast<float>(1 << LevelIndex);
+			if (!AppendCompressedClipmapLevel(
+				*Asset,
+				LevelIntervals,
+				LevelResolution,
+				LevelIndex,
+				ImportTileSize,
+				FVector2D(FileData.TexelWorldSizeX * TexelScale, FileData.TexelWorldSizeY * TexelScale),
+				ClipmapCompressionSeconds,
+				ClipmapCompressedBytes))
+			{
+				return 1;
+			}
+		}
+
+		UE_LOG(LogTemp, Display, TEXT("Built MH clipmap data: requestedLevels=%d builtLevels=%d clipmapTiles=%d clipmapNodes=%d clipmapRawIntervals=%d derived=%d clipmapCompressSeconds=%.3f clipmapCompressedBytes=%lld"),
+			RequestedClipmapLevels,
+			Asset->ClipmapLevels.Num(),
+			Asset->ClipmapTiles.Num(),
+			Asset->ClipmapNodes.Num(),
+			Asset->ClipmapRawIntervals.Num(),
+			bDeriveClipmapLevels ? 1 : 0,
+			ClipmapCompressionSeconds,
+			ClipmapCompressedBytes);
+	}
+
 	Package->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(Asset);
 	if (!SaveShadowDataAsset(OutputObjectPath, Asset))
@@ -1033,7 +1271,7 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 	WriteLightmassDualHitSequenceCsv(OutputObjectPath, DebugRays, DebugHits);
 	BuildLightmassDualTileData(OutputObjectPath, *Asset);
 
-	UE_LOG(LogTemp, Display, TEXT("Imported LightmassDual MH shadow asset: %s Source=%s Resolution=%dx%d TileSize=%d Tiles=%dx%d Valid=%d Nodes=%d Ratio=%.6f Flags Paired=%d Thin=%d Unpaired=%d MultiHit=%d DebugRays=%d DebugHits=%d"),
+	UE_LOG(LogTemp, Display, TEXT("Imported LightmassDual MH shadow asset: %s Source=%s Resolution=%dx%d TileSize=%d Tiles=%dx%d Valid=%d Nodes=%d Ratio=%.6f ClipmapLevels=%d ClipmapTiles=%d ClipmapNodes=%d Flags Paired=%d Thin=%d Unpaired=%d MultiHit=%d DebugRays=%d DebugHits=%d"),
 		*OutputObjectPath,
 		*FilePath,
 		Asset->Resolution.X,
@@ -1044,6 +1282,9 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 		Asset->Stats.ValidTexelCount,
 		Asset->Stats.NodeCount,
 		Asset->Stats.CompressionRatio,
+		Asset->ClipmapLevels.Num(),
+		Asset->ClipmapTiles.Num(),
+		Asset->ClipmapNodes.Num(),
 		FileData.PairedTexelCount,
 		FileData.ThinFallbackTexelCount,
 		FileData.UnpairedTexelCount,

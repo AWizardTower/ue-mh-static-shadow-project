@@ -130,6 +130,67 @@ static bool SampleRepresentativeDepth(const UMHShadowDataAsset& Asset, int32 X, 
 	return bHasDepth;
 }
 
+static bool SampleRepresentativeDepthFromTile(
+	const TArray<FMHShadowNode>& Nodes,
+	const FMHShadowTile& Tile,
+	int32 TileSize,
+	int32 LocalX,
+	int32 LocalY,
+	float& OutDepth)
+{
+	OutDepth = 1.0f;
+	if (Tile.RootNodeIndex < 0 || Tile.NodeCount <= 0 || TileSize <= 0 || !Nodes.IsValidIndex(Tile.RootNodeIndex))
+	{
+		return false;
+	}
+
+	int32 NodeIndex = Tile.RootNodeIndex;
+	FIntPoint NodeMin(0, 0);
+	int32 NodeSize = TileSize;
+	bool bHasDepth = false;
+
+	for (int32 Step = 0; Step < 32; ++Step)
+	{
+		if (!Nodes.IsValidIndex(NodeIndex) || NodeIndex < Tile.NodeOffset || NodeIndex >= Tile.NodeOffset + Tile.NodeCount)
+		{
+			return bHasDepth;
+		}
+
+		const FMHShadowNode& Node = Nodes[NodeIndex];
+		if (Node.bHasRepresentativeDepth)
+		{
+			OutDepth = Node.RepresentativeDepth;
+			bHasDepth = true;
+		}
+
+		const bool bHasChildren = Node.ChildIndices.X >= 0
+			|| Node.ChildIndices.Y >= 0
+			|| Node.ChildIndices.Z >= 0
+			|| Node.ChildIndices.W >= 0;
+		if (!bHasChildren || NodeSize <= 1)
+		{
+			return bHasDepth;
+		}
+
+		const int32 ChildSize = FMath::Max(NodeSize / 2, 1);
+		const int32 ChildX = (LocalX - NodeMin.X) >= ChildSize ? 1 : 0;
+		const int32 ChildY = (LocalY - NodeMin.Y) >= ChildSize ? 1 : 0;
+		const int32 ChildSlot = ChildY * 2 + ChildX;
+		const int32 ChildNodeIndex = GetChildIndex(Node.ChildIndices, ChildSlot);
+		if (ChildNodeIndex < Tile.NodeOffset || ChildNodeIndex >= Tile.NodeOffset + Tile.NodeCount)
+		{
+			return bHasDepth;
+		}
+
+		NodeIndex = ChildNodeIndex;
+		NodeMin.X += ChildX * ChildSize;
+		NodeMin.Y += ChildY * ChildSize;
+		NodeSize = ChildSize;
+	}
+
+	return bHasDepth;
+}
+
 static FString GetValidationOutputDir()
 {
 	const FString OutputDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("MHShadow"), TEXT("CompressionValidation"));
@@ -272,6 +333,98 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 		}
 	}
 
+	int32 ClipmapLevelCount = 0;
+	int32 ClipmapRawTexels = 0;
+	int32 ClipmapRepresentedTexels = 0;
+	int32 ClipmapMissingTexels = 0;
+	int32 ClipmapMismatchTexels = 0;
+	FString ClipmapCsv;
+	ClipmapCsv += TEXT("LevelIndex,ResolutionX,ResolutionY,TileCountX,TileCountY,RawTexels,RepresentedTexels,MissingTexels,MismatchTexels\n");
+	for (const FMHShadowClipmapLevel& Level : Asset->ClipmapLevels)
+	{
+		const bool bLevelValid =
+			Level.Resolution.X > 0
+			&& Level.Resolution.Y > 0
+			&& Level.TileSize > 0
+			&& Level.TileCount.X > 0
+			&& Level.TileCount.Y > 0
+			&& Level.RawIntervalOffset >= 0
+			&& Level.RawIntervalOffset + Level.RawIntervalCount <= Asset->ClipmapRawIntervals.Num()
+			&& Level.TileOffset >= 0
+			&& Level.TileOffset + Level.TileDataCount <= Asset->ClipmapTiles.Num();
+		if (!bLevelValid)
+		{
+			++ClipmapMissingTexels;
+			ClipmapCsv += FString::Printf(TEXT("%d,%d,%d,%d,%d,0,0,1,0\n"),
+				Level.LevelIndex,
+				Level.Resolution.X,
+				Level.Resolution.Y,
+				Level.TileCount.X,
+				Level.TileCount.Y);
+			continue;
+		}
+
+		++ClipmapLevelCount;
+		int32 LevelRawTexels = 0;
+		int32 LevelRepresentedTexels = 0;
+		int32 LevelMissingTexels = 0;
+		int32 LevelMismatchTexels = 0;
+		for (int32 Y = 0; Y < Level.Resolution.Y; ++Y)
+		{
+			for (int32 X = 0; X < Level.Resolution.X; ++X)
+			{
+				const int32 LocalTexelIndex = Y * Level.Resolution.X + X;
+				const int32 RawIndex = Level.RawIntervalOffset + LocalTexelIndex;
+				const FMHShadowDepthInterval& RawInterval = Asset->ClipmapRawIntervals[RawIndex];
+				const float ExpectedMin = RawInterval.bValid ? RawInterval.MinDepth : 1.0f;
+				const float ExpectedMax = RawInterval.bValid ? RawInterval.MaxDepth : 1.0f;
+				const int32 TileX = X / Level.TileSize;
+				const int32 TileY = Y / Level.TileSize;
+				const int32 LocalTileIndex = TileY * Level.TileCount.X + TileX;
+				const int32 TileIndex = Level.TileOffset + LocalTileIndex;
+
+				++LevelRawTexels;
+				float RepresentativeDepth = 1.0f;
+				if (!Asset->ClipmapTiles.IsValidIndex(TileIndex)
+					|| !SampleRepresentativeDepthFromTile(
+						Asset->ClipmapNodes,
+						Asset->ClipmapTiles[TileIndex],
+						Level.TileSize,
+						X - Asset->ClipmapTiles[TileIndex].TexelRect.X,
+						Y - Asset->ClipmapTiles[TileIndex].TexelRect.Y,
+						RepresentativeDepth))
+				{
+					++LevelMissingTexels;
+					continue;
+				}
+
+				const bool bInsideInterval = RepresentativeDepth >= ExpectedMin - Tolerance && RepresentativeDepth <= ExpectedMax + Tolerance;
+				if (!bInsideInterval)
+				{
+					++LevelMismatchTexels;
+					continue;
+				}
+
+				++LevelRepresentedTexels;
+			}
+		}
+
+		ClipmapRawTexels += LevelRawTexels;
+		ClipmapRepresentedTexels += LevelRepresentedTexels;
+		ClipmapMissingTexels += LevelMissingTexels;
+		ClipmapMismatchTexels += LevelMismatchTexels;
+		ClipmapCsv += FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d\n"),
+			Level.LevelIndex,
+			Level.Resolution.X,
+			Level.Resolution.Y,
+			Level.TileCount.X,
+			Level.TileCount.Y,
+			LevelRawTexels,
+			LevelRepresentedTexels,
+			LevelMissingTexels,
+			LevelMismatchTexels);
+	}
+
 	FString Csv;
 	Csv += TEXT("Metric,Value\n");
 	Csv += FString::Printf(TEXT("Asset,%s\n"), *AssetPath);
@@ -289,6 +442,11 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 	Csv += FString::Printf(TEXT("CompressionRatio,%.9f\n"), Asset->Stats.CompressionRatio);
 	Csv += FString::Printf(TEXT("TileSize,%d\n"), Asset->TileSize);
 	Csv += FString::Printf(TEXT("TileCount,%dx%d\n"), Asset->TileCount.X, Asset->TileCount.Y);
+	Csv += FString::Printf(TEXT("ClipmapLevels,%d\n"), ClipmapLevelCount);
+	Csv += FString::Printf(TEXT("ClipmapRawTexels,%d\n"), ClipmapRawTexels);
+	Csv += FString::Printf(TEXT("ClipmapRepresentedTexels,%d\n"), ClipmapRepresentedTexels);
+	Csv += FString::Printf(TEXT("ClipmapMissingTexels,%d\n"), ClipmapMissingTexels);
+	Csv += FString::Printf(TEXT("ClipmapMismatchTexels,%d\n"), ClipmapMismatchTexels);
 	Csv += FString::Printf(TEXT("AverageShrink,%.9f\n"), ValidRawTexels > 0 ? ShrinkSum / static_cast<double>(ValidRawTexels) : 0.0);
 	Csv += FString::Printf(TEXT("MaxShrink,%.9f\n"), MaxShrink);
 	Csv += TEXT("\nErrorType,X,Y,TexelIndex,ExpectedMin,ExpectedMax,RepresentativeDepth\n");
@@ -337,6 +495,8 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 	}
 	const FString TileCsvPath = FPaths::Combine(GetValidationOutputDir(), SafeName + TEXT("_TileCompressionValidation.csv"));
 	FFileHelper::SaveStringToFile(TileCsv, *TileCsvPath);
+	const FString ClipmapCsvPath = FPaths::Combine(GetValidationOutputDir(), SafeName + TEXT("_ClipmapCompressionValidation.csv"));
+	FFileHelper::SaveStringToFile(ClipmapCsv, *ClipmapCsvPath);
 
 	UE_LOG(LogTemp, Display, TEXT("MH compression validation: %s"), *AssetPath);
 	UE_LOG(LogTemp, Display, TEXT("RawTexels=%d Valid=%d Empty=%d Represented=%d Missing=%d Mismatch=%d Tiles=%dx%d Nodes=%d Ratio=%.6f"),
@@ -355,8 +515,15 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 		*TileCsvPath,
 		WorstTileIndex,
 		WorstTileMismatch);
+	UE_LOG(LogTemp, Display, TEXT("Clipmap compression validation: Levels=%d RawTexels=%d Represented=%d Missing=%d Mismatch=%d CSV=%s"),
+		ClipmapLevelCount,
+		ClipmapRawTexels,
+		ClipmapRepresentedTexels,
+		ClipmapMissingTexels,
+		ClipmapMismatchTexels,
+		*ClipmapCsvPath);
 
-	if (MissingTexels != 0 || MismatchTexels != 0 || Asset->Stats.CompressionRatio >= 1.0f)
+	if (MissingTexels != 0 || MismatchTexels != 0 || ClipmapMissingTexels != 0 || ClipmapMismatchTexels != 0 || Asset->Stats.CompressionRatio >= 1.0f)
 	{
 		UE_LOG(LogTemp, Error, TEXT("MH compression validation failed."));
 		return 1;

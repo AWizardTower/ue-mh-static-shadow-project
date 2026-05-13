@@ -102,6 +102,63 @@ struct FMHShadowTile
 };
 
 USTRUCT(BlueprintType)
+struct FMHShadowClipmapLevel
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 LevelIndex = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	FIntPoint Resolution = FIntPoint::ZeroValue;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 TileSize = 128;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	FIntPoint TileCount = FIntPoint::ZeroValue;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 RawIntervalOffset = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 RawIntervalCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 TileOffset = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 TileDataCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 PageTableOffset = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 PageTableCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 NodeOffset = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	int32 NodeCount = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	FVector2D TexelWorldSize = FVector2D::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	FVector4 WorldToShadowRow0 = FVector4(1, 0, 0, 0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	FVector4 WorldToShadowRow1 = FVector4(0, 1, 0, 0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	FVector4 WorldToShadowRow2 = FVector4(0, 0, 1, 0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	FVector4 WorldToShadowRow3 = FVector4(0, 0, 0, 1);
+};
+
+USTRUCT(BlueprintType)
 struct FMHShadowBakeStats
 {
 	GENERATED_BODY()

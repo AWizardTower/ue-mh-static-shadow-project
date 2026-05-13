@@ -85,6 +85,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Tiles")
 	TArray<int32> PageTable;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	TArray<FMHShadowClipmapLevel> ClipmapLevels;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	TArray<FMHShadowDepthInterval> ClipmapRawIntervals;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	TArray<FMHShadowNode> ClipmapNodes;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	TArray<FMHShadowTile> ClipmapTiles;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow|Clipmap")
+	TArray<int32> ClipmapPageTable;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MH Shadow")
 	FMHShadowBakeStats Stats;
 

@@ -109,6 +109,25 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 		TileRatioSum += Tile.CompressionRatio;
 	}
 	const float AvgTileRatio = Asset->Tiles.Num() > 0 ? static_cast<float>(TileRatioSum / static_cast<double>(Asset->Tiles.Num())) : 0.0f;
+	int32 ClipmapLevelRawTexels = 0;
+	bool bHasValidClipmapLevels = Asset->ClipmapLevels.Num() > 0;
+	for (const FMHShadowClipmapLevel& Level : Asset->ClipmapLevels)
+	{
+		const bool bLevelValid = Level.Resolution.X > 0
+			&& Level.Resolution.Y > 0
+			&& Level.TileSize > 0
+			&& Level.TileDataCount == Level.TileCount.X * Level.TileCount.Y
+			&& Level.RawIntervalOffset >= 0
+			&& Level.RawIntervalOffset + Level.RawIntervalCount <= Asset->ClipmapRawIntervals.Num()
+			&& Level.TileOffset >= 0
+			&& Level.TileOffset + Level.TileDataCount <= Asset->ClipmapTiles.Num()
+			&& Level.PageTableOffset >= 0
+			&& Level.PageTableOffset + Level.PageTableCount <= Asset->ClipmapPageTable.Num()
+			&& Level.NodeOffset >= 0
+			&& Level.NodeOffset + Level.NodeCount <= Asset->ClipmapNodes.Num();
+		bHasValidClipmapLevels &= bLevelValid;
+		ClipmapLevelRawTexels += Level.RawIntervalCount;
+	}
 
 	bool bOk = true;
 	const bool bHasTiledData = Asset->TileCount.X > 0
@@ -135,6 +154,7 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 	if (Asset->BakeSource == EMHShadowBakeSource::LightmassDual)
 	{
 		bOk &= bHasTiledData;
+		bOk &= !Asset->ClipmapLevels.Num() || bHasValidClipmapLevels;
 		bOk &= Asset->TileSize > 0;
 		bOk &= (Asset->Resolution.X % Asset->TileSize) == 0;
 		bOk &= (Asset->Resolution.Y % Asset->TileSize) == 0;
@@ -189,6 +209,14 @@ int32 UMHShadowInspectDataCommandlet::Main(const FString& Params)
 		AvgTileRatio,
 		MaxTileRatio,
 		WorstTileIndex);
+	UE_LOG(LogTemp, Display, TEXT("ClipmapLevels=%d ClipmapRawIntervals=%d ClipmapLevelRawTexels=%d ClipmapTiles=%d ClipmapPageTable=%d ClipmapNodes=%d Valid=%d"),
+		Asset->ClipmapLevels.Num(),
+		Asset->ClipmapRawIntervals.Num(),
+		ClipmapLevelRawTexels,
+		Asset->ClipmapTiles.Num(),
+		Asset->ClipmapPageTable.Num(),
+		Asset->ClipmapNodes.Num(),
+		bHasValidClipmapLevels ? 1 : 0);
 	if (Expectation.Equals(TEXT("ClosedCube"), ESearchCase::IgnoreCase))
 	{
 		UE_LOG(LogTemp, Display, TEXT("ClosedCube expectation: Empty=%d Paired=%d ThinFallback=%d Valid=%d MaxThickness=%.6f"),
