@@ -10,7 +10,7 @@ public class shadow : ModuleRules
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "Renderer", "RenderCore", "RHI" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "Renderer", "RenderCore", "RHI", "ImageCore", "ImageWrapper" });
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
