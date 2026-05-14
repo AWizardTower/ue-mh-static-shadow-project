@@ -30,6 +30,12 @@ public:
 			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartLargeCacheStressBenchmark),
 			ECVF_Default);
 
+		RunClipmapRegressionCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Benchmark.RunClipmapRegression"),
+			TEXT("Run the MH static shadow clipmap regression benchmark with single-level and tuning routes."),
+			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartClipmapRegressionBenchmark),
+			ECVF_Default);
+
 		StopBenchmarkCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("MHShadow.Benchmark.Stop"),
 			TEXT("Stop the active MH static shadow benchmark."),
@@ -56,6 +62,11 @@ public:
 			IConsoleManager::Get().UnregisterConsoleObject(RunLargeCacheStressCommand);
 			RunLargeCacheStressCommand = nullptr;
 		}
+		if (RunClipmapRegressionCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(RunClipmapRegressionCommand);
+			RunClipmapRegressionCommand = nullptr;
+		}
 		if (StopBenchmarkCommand)
 		{
 			IConsoleManager::Get().UnregisterConsoleObject(StopBenchmarkCommand);
@@ -70,6 +81,7 @@ private:
 	IConsoleObject* RunBenchmarkCommand = nullptr;
 	IConsoleObject* CaptureCurrentCommand = nullptr;
 	IConsoleObject* RunLargeCacheStressCommand = nullptr;
+	IConsoleObject* RunClipmapRegressionCommand = nullptr;
 	IConsoleObject* StopBenchmarkCommand = nullptr;
 };
 
