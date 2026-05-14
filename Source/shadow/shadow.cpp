@@ -24,6 +24,12 @@ public:
 			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::CaptureCurrent),
 			ECVF_Default);
 
+		RunLargeCacheStressCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Benchmark.RunLargeCacheStress"),
+			TEXT("Run the large MH static shadow page-cache/clipmap stress benchmark in PIE or Standalone."),
+			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartLargeCacheStressBenchmark),
+			ECVF_Default);
+
 		StopBenchmarkCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("MHShadow.Benchmark.Stop"),
 			TEXT("Stop the active MH static shadow benchmark."),
@@ -45,6 +51,11 @@ public:
 			IConsoleManager::Get().UnregisterConsoleObject(CaptureCurrentCommand);
 			CaptureCurrentCommand = nullptr;
 		}
+		if (RunLargeCacheStressCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(RunLargeCacheStressCommand);
+			RunLargeCacheStressCommand = nullptr;
+		}
 		if (StopBenchmarkCommand)
 		{
 			IConsoleManager::Get().UnregisterConsoleObject(StopBenchmarkCommand);
@@ -58,6 +69,7 @@ private:
 	FMHShadowBenchmarkRunner BenchmarkRunner;
 	IConsoleObject* RunBenchmarkCommand = nullptr;
 	IConsoleObject* CaptureCurrentCommand = nullptr;
+	IConsoleObject* RunLargeCacheStressCommand = nullptr;
 	IConsoleObject* StopBenchmarkCommand = nullptr;
 };
 

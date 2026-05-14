@@ -15,10 +15,17 @@ public:
 	~FMHShadowBenchmarkRunner();
 
 	void StartBenchmark();
+	void StartLargeCacheStressBenchmark();
 	void CaptureCurrent();
 	void StopBenchmark();
 
 private:
+	enum class EBenchmarkProfile : uint8
+	{
+		BakeTest,
+		LargeCacheStress
+	};
+
 	struct FCameraSpec
 	{
 		FString Name;
@@ -34,6 +41,7 @@ private:
 		bool bAtlasBaseline = false;
 		bool bCompareToAtlas = false;
 		bool bClipmapStabilityRepeat = false;
+		bool bResetCacheAtRouteStart = false;
 		FString Notes;
 	};
 
@@ -67,12 +75,16 @@ private:
 	};
 
 	bool Tick(float DeltaTime);
-	void BuildBenchmarkPlan();
+	void StartBenchmarkInternal(EBenchmarkProfile Profile);
+	void BuildBenchmarkPlan(EBenchmarkProfile Profile);
+	void BuildBakeTestPlan();
+	void BuildLargeCacheStressPlan();
 	void StartNextStep();
 	void FinishBenchmark();
 	void ApplyStep(const FBenchmarkStep& Step);
 	void ApplyCamera(const FCameraSpec& CameraSpec);
 	void DestroyBenchmarkCamera();
+	bool EnsureLargeCacheStressData(UWorld& World);
 	void Exec(UWorld* World, const FString& Command) const;
 	UWorld* GetBenchmarkWorld() const;
 	bool CaptureViewport(const FString& Filename, FIntPoint& OutSize, TArray<float>& OutLuma) const;
@@ -94,6 +106,7 @@ private:
 	TMap<FString, FIntPoint> ClipmapSizeByCamera;
 
 	FString OutputDir;
+	FString ActiveProfileName = TEXT("BakeTest");
 	double BenchmarkStartTime = 0.0;
 	int32 CurrentStepIndex = INDEX_NONE;
 	int32 RemainingSettleFrames = 0;

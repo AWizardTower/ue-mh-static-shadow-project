@@ -6,9 +6,12 @@
 #include "Containers/Ticker.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "ImageUtils.h"
+#include "MHShadowComponent.h"
+#include "MHShadowDataAsset.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
@@ -41,6 +44,16 @@ FMHShadowBenchmarkRunner::~FMHShadowBenchmarkRunner()
 
 void FMHShadowBenchmarkRunner::StartBenchmark()
 {
+	StartBenchmarkInternal(EBenchmarkProfile::BakeTest);
+}
+
+void FMHShadowBenchmarkRunner::StartLargeCacheStressBenchmark()
+{
+	StartBenchmarkInternal(EBenchmarkProfile::LargeCacheStress);
+}
+
+void FMHShadowBenchmarkRunner::StartBenchmarkInternal(EBenchmarkProfile Profile)
+{
 	if (bRunning)
 	{
 		UE_LOG(LogMHShadowBenchmark, Warning, TEXT("Benchmark is already running."));
@@ -54,10 +67,15 @@ void FMHShadowBenchmarkRunner::StartBenchmark()
 		return;
 	}
 
-	BuildBenchmarkPlan();
+	BuildBenchmarkPlan(Profile);
+
+	if (Profile == EBenchmarkProfile::LargeCacheStress && !EnsureLargeCacheStressData(*World))
+	{
+		return;
+	}
 
 	const FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
-	OutputDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("MHShadow"), TEXT("Benchmark"), Timestamp);
+	OutputDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("MHShadow"), TEXT("Benchmark"), FString::Printf(TEXT("%s_%s"), *ActiveProfileName, *Timestamp));
 	IFileManager::Get().MakeDirectory(*OutputDir, true);
 
 	CaptureRows.Reset();
@@ -75,15 +93,15 @@ void FMHShadowBenchmarkRunner::StartBenchmark()
 
 	Exec(World, TEXT("r.Shadow.MHStatic.Stats.Enable 1"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Stats.CSV 1"));
-	Exec(World, TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 10"));
+	Exec(World, Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 2") : TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 10"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Feedback.Enable 1"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Cache.Enable 1"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX 8"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY 8"));
-	Exec(World, TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 64"));
-	Exec(World, TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 3"));
-	Exec(World, TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance 300"));
-	Exec(World, TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale 1.5"));
+	Exec(World, Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 8") : TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 64"));
+	Exec(World, Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 4") : TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 3"));
+	Exec(World, Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance 900") : TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance 300"));
+	Exec(World, Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale 1.75") : TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale 1.5"));
 
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FMHShadowBenchmarkRunner::Tick));
 	UE_LOG(LogMHShadowBenchmark, Display, TEXT("MH benchmark started. Output: %s"), *OutputDir);
@@ -166,8 +184,21 @@ bool FMHShadowBenchmarkRunner::Tick(float DeltaTime)
 	return true;
 }
 
-void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
+void FMHShadowBenchmarkRunner::BuildBenchmarkPlan(EBenchmarkProfile Profile)
 {
+	if (Profile == EBenchmarkProfile::LargeCacheStress)
+	{
+		BuildLargeCacheStressPlan();
+	}
+	else
+	{
+		BuildBakeTestPlan();
+	}
+}
+
+void FMHShadowBenchmarkRunner::BuildBakeTestPlan()
+{
+	ActiveProfileName = TEXT("BakeTest");
 	Cameras.Reset();
 	Captures.Reset();
 	Steps.Reset();
@@ -185,6 +216,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 			TEXT("r.Shadow.MHStatic.Debug 0")
 		},
 		8,
+		false,
 		false,
 		false,
 		false,
@@ -207,6 +239,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		true,
 		false,
 		false,
+		false,
 		TEXT("Golden hard-shadow visibility from full restored atlas")
 	});
 
@@ -220,6 +253,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		6,
 		false,
 		true,
+		false,
 		false,
 		TEXT("Uncompressed front-depth baseline")
 	});
@@ -235,6 +269,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		false,
 		true,
 		false,
+		false,
 		TEXT("Direct compressed MH representative-depth sampling")
 	});
 
@@ -248,6 +283,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		6,
 		false,
 		true,
+		false,
 		false,
 		TEXT("All-resident virtual page atlas")
 	});
@@ -264,6 +300,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		22,
 		false,
 		true,
+		false,
 		false,
 		TEXT("Limited physical page cache after feedback has time to fill pages")
 	});
@@ -282,6 +319,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		false,
 		true,
 		false,
+		false,
 		TEXT("Virtual clipmap hard-shadow result")
 	});
 
@@ -295,6 +333,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		false,
 		false,
 		true,
+		false,
 		TEXT("Repeat capture for same-camera temporal stability")
 	});
 
@@ -305,6 +344,7 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 			TEXT("r.Shadow.MHStatic.Debug 18")
 		},
 		6,
+		false,
 		false,
 		false,
 		false,
@@ -321,12 +361,197 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan()
 		false,
 		false,
 		false,
+		false,
 		TEXT("Clipmap miss/fallback visualization")
 	});
 
 	for (int32 CameraIndex = 0; CameraIndex < Cameras.Num(); ++CameraIndex)
 	{
 		for (int32 CaptureIndex = 0; CaptureIndex < Captures.Num(); ++CaptureIndex)
+		{
+			Steps.Add({ CameraIndex, CaptureIndex });
+		}
+	}
+}
+
+void FMHShadowBenchmarkRunner::BuildLargeCacheStressPlan()
+{
+	ActiveProfileName = TEXT("LargeCacheStress");
+	Cameras.Reset();
+	Captures.Reset();
+	Steps.Reset();
+
+	Cameras.Add({ TEXT("OverviewHigh"), FVector(-6200.0, -6200.0, 3600.0), FVector(0.0, 0.0, 180.0) });
+	Cameras.Add({ TEXT("NorthWestLow"), FVector(-4300.0, -4300.0, 720.0), FVector(-2500.0, -2500.0, 160.0) });
+	Cameras.Add({ TEXT("NorthSweep"), FVector(-2400.0, -5600.0, 680.0), FVector(900.0, -2600.0, 150.0) });
+	Cameras.Add({ TEXT("CenterA"), FVector(-1700.0, -1800.0, 560.0), FVector(800.0, 900.0, 160.0) });
+	Cameras.Add({ TEXT("CenterB"), FVector(1300.0, -2200.0, 540.0), FVector(-900.0, 1300.0, 160.0) });
+	Cameras.Add({ TEXT("EastRun"), FVector(5600.0, -1300.0, 700.0), FVector(2600.0, 1300.0, 170.0) });
+	Cameras.Add({ TEXT("FarCorner"), FVector(5600.0, 5600.0, 940.0), FVector(2500.0, 2500.0, 180.0) });
+	Cameras.Add({ TEXT("SouthDiag"), FVector(2400.0, 5700.0, 720.0), FVector(-1000.0, 1500.0, 160.0) });
+	Cameras.Add({ TEXT("WestRun"), FVector(-5600.0, 1200.0, 700.0), FVector(-2500.0, -900.0, 160.0) });
+	Cameras.Add({ TEXT("ContactA"), FVector(-2500.0, 300.0, 320.0), FVector(-1800.0, 600.0, 130.0) });
+	Cameras.Add({ TEXT("ContactB"), FVector(800.0, 1800.0, 360.0), FVector(1300.0, 2200.0, 130.0) });
+	Cameras.Add({ TEXT("ReturnOverview"), FVector(-6200.0, -6200.0, 3600.0), FVector(0.0, 0.0, 180.0) });
+
+	Captures.Add({
+		TEXT("AtlasBaseline"),
+		{
+			TEXT("r.Shadow.MHStatic.Enable 1"),
+			TEXT("r.Shadow.MHStatic.Mode 3"),
+			TEXT("r.Shadow.MHStatic.Source 2"),
+			TEXT("r.Shadow.MHStatic.Debug 1"),
+			TEXT("r.Shadow.MHStatic.DepthTest 0"),
+			TEXT("r.Shadow.MHStatic.DepthBiasScale 0"),
+			TEXT("r.Shadow.MHStatic.DepthBiasAdd 0"),
+			TEXT("r.Shadow.MHStatic.Restored.EnablePCF 0")
+		},
+		10,
+		true,
+		false,
+		false,
+		false,
+		TEXT("Full restored atlas hard-shadow baseline for stress scene")
+	});
+
+	Captures.Add({
+		TEXT("VirtualPageAtlas"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 4"),
+			TEXT("r.Shadow.MHStatic.Debug 1"),
+			TEXT("r.Shadow.MHStatic.DepthTest 0")
+		},
+		8,
+		false,
+		true,
+		false,
+		false,
+		TEXT("All-resident virtual page atlas sanity check")
+	});
+
+	Captures.Add({
+		TEXT("LimitedCache_4x4"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 5"),
+			TEXT("r.Shadow.MHStatic.Debug 1"),
+			TEXT("r.Shadow.MHStatic.Cache.Enable 1"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX 4"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY 4"),
+			TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 8"),
+			TEXT("r.Shadow.MHStatic.Feedback.Enable 1")
+		},
+		10,
+		false,
+		true,
+		false,
+		true,
+		TEXT("Limited page cache stress route with 16 physical pages")
+	});
+
+	Captures.Add({
+		TEXT("LimitedCache_8x8"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 5"),
+			TEXT("r.Shadow.MHStatic.Debug 1"),
+			TEXT("r.Shadow.MHStatic.Cache.Enable 1"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX 8"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY 8"),
+			TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 16"),
+			TEXT("r.Shadow.MHStatic.Feedback.Enable 1")
+		},
+		10,
+		false,
+		true,
+		false,
+		true,
+		TEXT("Limited page cache comparison route with 64 physical pages")
+	});
+
+	Captures.Add({
+		TEXT("Clipmap_4x4"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 6"),
+			TEXT("r.Shadow.MHStatic.Debug 1"),
+			TEXT("r.Shadow.MHStatic.Cache.Enable 1"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX 4"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY 4"),
+			TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 8"),
+			TEXT("r.Shadow.MHStatic.Feedback.Enable 1"),
+			TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 4")
+		},
+		10,
+		false,
+		true,
+		false,
+		true,
+		TEXT("Virtual clipmap stress route with 16 physical pages")
+	});
+
+	Captures.Add({
+		TEXT("Clipmap"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 6"),
+			TEXT("r.Shadow.MHStatic.Debug 1"),
+			TEXT("r.Shadow.MHStatic.Cache.Enable 1"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX 8"),
+			TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY 8"),
+			TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 16"),
+			TEXT("r.Shadow.MHStatic.Feedback.Enable 1"),
+			TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 4")
+		},
+		10,
+		false,
+		true,
+		false,
+		true,
+		TEXT("Virtual clipmap comparison route with 64 physical pages")
+	});
+
+	Captures.Add({
+		TEXT("ClipmapRepeat"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 6"),
+			TEXT("r.Shadow.MHStatic.Debug 1")
+		},
+		8,
+		false,
+		false,
+		true,
+		false,
+		TEXT("Repeat capture for Source=6 8x8 temporal stability")
+	});
+
+	Captures.Add({
+		TEXT("ClipmapLevelDebug"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 6"),
+			TEXT("r.Shadow.MHStatic.Debug 18")
+		},
+		6,
+		false,
+		false,
+		false,
+		false,
+		TEXT("Clipmap level visualization")
+	});
+
+	Captures.Add({
+		TEXT("ClipmapFallbackDebug"),
+		{
+			TEXT("r.Shadow.MHStatic.Source 6"),
+			TEXT("r.Shadow.MHStatic.Debug 20")
+		},
+		6,
+		false,
+		false,
+		false,
+		false,
+		TEXT("Clipmap miss/fallback visualization")
+	});
+
+	for (int32 CaptureIndex = 0; CaptureIndex < Captures.Num(); ++CaptureIndex)
+	{
+		for (int32 CameraIndex = 0; CameraIndex < Cameras.Num(); ++CameraIndex)
 		{
 			Steps.Add({ CameraIndex, CaptureIndex });
 		}
@@ -379,6 +604,10 @@ void FMHShadowBenchmarkRunner::ApplyStep(const FBenchmarkStep& Step)
 	}
 
 	ApplyCamera(Cameras[Step.CameraIndex]);
+	if (Step.CameraIndex == 0 && Captures[Step.CaptureIndex].bResetCacheAtRouteStart)
+	{
+		Exec(World, TEXT("r.Shadow.MHStatic.Cache.Reset 1"));
+	}
 	for (const FString& Command : Captures[Step.CaptureIndex].Commands)
 	{
 		Exec(World, Command);
@@ -428,6 +657,55 @@ void FMHShadowBenchmarkRunner::DestroyBenchmarkCamera()
 		}
 	}
 	BenchmarkCamera.Reset();
+}
+
+bool FMHShadowBenchmarkRunner::EnsureLargeCacheStressData(UWorld& World)
+{
+	const TCHAR* StressAssetPath = TEXT("/Game/MHShadow/Baked/MHShadowData_LightmassDual_LargeCacheStress_4096_Clipmap_Final.MHShadowData_LightmassDual_LargeCacheStress_4096_Clipmap_Final");
+
+	UMHShadowDataAsset* StressAsset = LoadObject<UMHShadowDataAsset>(nullptr, StressAssetPath);
+	if (!StressAsset)
+	{
+		StressAssetPath = TEXT("/Game/MHShadow/Baked/MHShadowData_LightmassDual_LargeCacheStress_4096_Clipmap.MHShadowData_LightmassDual_LargeCacheStress_4096_Clipmap");
+		StressAsset = LoadObject<UMHShadowDataAsset>(nullptr, StressAssetPath);
+	}
+	if (!StressAsset || !StressAsset->IsValidForRendering())
+	{
+		UE_LOG(LogMHShadowBenchmark, Error, TEXT("LargeCacheStress benchmark needs a valid asset: %s. Build lighting and import with MHShadowImportLightmassDual first."), StressAssetPath);
+		return false;
+	}
+
+	int32 ComponentCount = 0;
+	for (TActorIterator<AActor> It(&World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor)
+		{
+			continue;
+		}
+
+		for (UActorComponent* Component : Actor->GetComponents())
+		{
+			UMHShadowComponent* MHComponent = Cast<UMHShadowComponent>(Component);
+			if (!MHComponent)
+			{
+				continue;
+			}
+
+			MHComponent->ShadowData = StressAsset;
+			MHComponent->RegisterShadowData();
+			++ComponentCount;
+		}
+	}
+
+	if (ComponentCount == 0)
+	{
+		UE_LOG(LogMHShadowBenchmark, Error, TEXT("LargeCacheStress benchmark found no UMHShadowComponent in map %s."), *World.GetPathName());
+		return false;
+	}
+
+	UE_LOG(LogMHShadowBenchmark, Display, TEXT("LargeCacheStress benchmark assigned %s to %d MHShadowComponent(s)."), *StressAsset->GetPathName(), ComponentCount);
+	return true;
 }
 
 void FMHShadowBenchmarkRunner::Exec(UWorld* World, const FString& Command) const
