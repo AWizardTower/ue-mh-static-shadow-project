@@ -36,6 +36,18 @@ public:
 			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartClipmapRegressionBenchmark),
 			ECVF_Default);
 
+		RunClipmapDegenerationCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Benchmark.RunClipmapDegeneration"),
+			TEXT("Run the MH static shadow clipmap single-level degeneration benchmark."),
+			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartClipmapDegenerationBenchmark),
+			ECVF_Default);
+
+		RunCellProviderRegressionCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Benchmark.RunCellProviderRegression"),
+			TEXT("Run the MH static shadow cell-provider clipmap regression benchmark in PIE or Standalone."),
+			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartCellProviderRegressionBenchmark),
+			ECVF_Default);
+
 		StopBenchmarkCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("MHShadow.Benchmark.Stop"),
 			TEXT("Stop the active MH static shadow benchmark."),
@@ -67,6 +79,16 @@ public:
 			IConsoleManager::Get().UnregisterConsoleObject(RunClipmapRegressionCommand);
 			RunClipmapRegressionCommand = nullptr;
 		}
+		if (RunClipmapDegenerationCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(RunClipmapDegenerationCommand);
+			RunClipmapDegenerationCommand = nullptr;
+		}
+		if (RunCellProviderRegressionCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(RunCellProviderRegressionCommand);
+			RunCellProviderRegressionCommand = nullptr;
+		}
 		if (StopBenchmarkCommand)
 		{
 			IConsoleManager::Get().UnregisterConsoleObject(StopBenchmarkCommand);
@@ -82,6 +104,8 @@ private:
 	IConsoleObject* CaptureCurrentCommand = nullptr;
 	IConsoleObject* RunLargeCacheStressCommand = nullptr;
 	IConsoleObject* RunClipmapRegressionCommand = nullptr;
+	IConsoleObject* RunClipmapDegenerationCommand = nullptr;
+	IConsoleObject* RunCellProviderRegressionCommand = nullptr;
 	IConsoleObject* StopBenchmarkCommand = nullptr;
 };
 

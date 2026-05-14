@@ -59,9 +59,12 @@ void UMHShadowComponent::RegisterShadowData()
 #if WITH_MH_STATIC_SHADOW_RENDERER
 	if (!ShadowData || !ShadowData->IsValidForRendering())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MHShadowComponent skipped invalid ShadowData component=%s asset=%s"),
-			*GetPathName(),
-			ShadowData ? *ShadowData->GetPathName() : TEXT("None"));
+		if (ShadowData)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("MHShadowComponent skipped invalid ShadowData component=%s asset=%s"),
+				*GetPathName(),
+				*ShadowData->GetPathName());
+		}
 		UnregisterShadowData();
 		return;
 	}

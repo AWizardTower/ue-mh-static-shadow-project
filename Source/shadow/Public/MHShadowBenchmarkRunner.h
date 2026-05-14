@@ -6,6 +6,7 @@
 #include "Containers/Ticker.h"
 
 class ACameraActor;
+class UMHShadowDataAsset;
 class UWorld;
 
 class FMHShadowBenchmarkRunner
@@ -17,6 +18,8 @@ public:
 	void StartBenchmark();
 	void StartLargeCacheStressBenchmark();
 	void StartClipmapRegressionBenchmark();
+	void StartClipmapDegenerationBenchmark();
+	void StartCellProviderRegressionBenchmark();
 	void CaptureCurrent();
 	void StopBenchmark();
 
@@ -25,7 +28,9 @@ private:
 	{
 		BakeTest,
 		LargeCacheStress,
-		ClipmapRegression
+		ClipmapRegression,
+		ClipmapDegeneration,
+		CellProviderRegression
 	};
 
 	struct FCameraSpec
@@ -33,6 +38,13 @@ private:
 		FString Name;
 		FVector Location = FVector::ZeroVector;
 		FVector Target = FVector::ZeroVector;
+	};
+
+	enum class EShadowProviderMode : uint8
+	{
+		Default,
+		Monolithic,
+		CellProvider
 	};
 
 	struct FCaptureSpec
@@ -46,6 +58,9 @@ private:
 		bool bResetCacheAtRouteStart = false;
 		FString Notes;
 		FString StabilityBaselineName;
+		EShadowProviderMode ProviderMode = EShadowProviderMode::Default;
+		int32 CellDisableModulo = 0;
+		int32 CellDisableRemainder = 0;
 	};
 
 	struct FBenchmarkStep
@@ -61,6 +76,10 @@ private:
 		FString Filename;
 		FIntPoint Size = FIntPoint::ZeroValue;
 		double TimeSeconds = 0.0;
+		double MeanLuma = 0.0;
+		double MinLuma = 0.0;
+		double MaxLuma = 0.0;
+		double NonBlackPercent = 0.0;
 		FString Notes;
 	};
 
@@ -97,6 +116,10 @@ private:
 		double CompressionRatio = 0.0;
 		double PhysicalAtlasMemoryRatio = 0.0;
 		double ResidentPageRatio = 0.0;
+		uint64 ProviderMemoryBytes = 0;
+		uint64 LargestProviderCellBytes = 0;
+		int32 ProviderLoadedCells = 0;
+		int32 ProviderUnavailablePages = 0;
 	};
 
 	struct FRuntimeLevelRow
@@ -123,7 +146,15 @@ private:
 		FRuntimeSummaryRow Summary;
 		int32 UploadsSinceRouteStart = 0;
 		int32 EvictionsSinceRouteStart = 0;
+		int32 DisabledCells = 0;
+		int32 ExpectedUnavailablePages = 0;
 		TArray<FRuntimeLevelRow> Levels;
+	};
+
+	struct FProviderRouteStats
+	{
+		int32 DisabledCells = 0;
+		int32 ExpectedUnavailablePages = 0;
 	};
 
 	struct FPairwiseSpec
@@ -138,12 +169,16 @@ private:
 	void BuildBakeTestPlan();
 	void BuildLargeCacheStressPlan();
 	void BuildClipmapRegressionPlan();
+	void BuildClipmapDegenerationPlan();
+	void BuildCellProviderRegressionPlan();
 	void StartNextStep();
 	void FinishBenchmark();
 	void ApplyStep(const FBenchmarkStep& Step);
 	void ApplyCamera(const FCameraSpec& CameraSpec);
 	void DestroyBenchmarkCamera();
 	bool EnsureLargeCacheStressData(UWorld& World);
+	UMHShadowDataAsset* LoadLargeCacheStressDataAsset() const;
+	bool ConfigureShadowProvider(UWorld& World, const FCaptureSpec& Capture);
 	void Exec(UWorld* World, const FString& Command) const;
 	UWorld* GetBenchmarkWorld() const;
 	bool CaptureViewport(const FString& Filename, FIntPoint& OutSize, TArray<float>& OutLuma) const;
@@ -174,6 +209,7 @@ private:
 	TMap<FString, FIntPoint> ClipmapSizeByCamera;
 	TMap<FString, FIntPoint> CaptureSizeByKey;
 	TMap<FString, uint64> RouteStartFrameByCapture;
+	TMap<FString, FProviderRouteStats> ProviderRouteStatsByCapture;
 
 	FString OutputDir;
 	FString ActiveProfileName = TEXT("BakeTest");
