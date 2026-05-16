@@ -5,6 +5,50 @@
 #include "MHShadowBenchmarkRunner.h"
 #include "Modules/ModuleManager.h"
 
+namespace
+{
+	void SetMHShadowCVarInt(const TCHAR* Name, int32 Value)
+	{
+		if (IConsoleVariable* Variable = IConsoleManager::Get().FindConsoleVariable(Name))
+		{
+			Variable->Set(Value, ECVF_SetByConsole);
+		}
+	}
+
+	void SetMHShadowCVarFloat(const TCHAR* Name, float Value)
+	{
+		if (IConsoleVariable* Variable = IConsoleManager::Get().FindConsoleVariable(Name))
+		{
+			Variable->Set(Value, ECVF_SetByConsole);
+		}
+	}
+
+	void ApplyCommonSource6Preset()
+	{
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Enable"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Mode"), 3);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Source"), 6);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Debug"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Clipmap.LevelCount"), 3);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance"), 1600.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale"), 2.0f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Clipmap.FineLevelBias"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Clipmap.FallbackToCoarser"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Clipmap.FallbackMaxCoarserLevels"), 3);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Enable"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Feedback.Enable"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PriorityMode"), 1);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Cache.LevelPriorityScale"), 0.15f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Cache.ResidencyBoost"), 0.25f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.EvictRequested"), 1);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Cache.EvictHysteresis"), 0.15f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame"), 32);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.DepthTest"), 0);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), 0.01f);
+	}
+}
+
 class FShadowModule final : public FDefaultGameModuleImpl
 {
 public:
@@ -60,10 +104,34 @@ public:
 			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartCacheStrategyRegressionBenchmark),
 			ECVF_Default);
 
+		RunQualityRegressionCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Benchmark.RunQualityRegression"),
+			TEXT("Run the MH static shadow UE-style bias and stable PCF quality benchmark in PIE or Standalone."),
+			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartQualityRegressionBenchmark),
+			ECVF_Default);
+
 		StopBenchmarkCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("MHShadow.Benchmark.Stop"),
 			TEXT("Stop the active MH static shadow benchmark."),
 			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StopBenchmark),
+			ECVF_Default);
+
+		HardClipmap16PresetCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Preset.HardClipmap16"),
+			TEXT("Apply the recommended Source=6 hard-shadow preset: 16x16 cache, priority, prefetch, tuned fixed bias."),
+			FConsoleCommandDelegate::CreateRaw(this, &FShadowModule::ApplyHardClipmap16Preset),
+			ECVF_Default);
+
+		LowMemoryHardClipmap8PresetCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Preset.LowMemoryHardClipmap8"),
+			TEXT("Apply the low-memory Source=6 hard-shadow preset: 8x8 cache, priority, no prefetch, tuned fixed bias."),
+			FConsoleCommandDelegate::CreateRaw(this, &FShadowModule::ApplyLowMemoryHardClipmap8Preset),
+			ECVF_Default);
+
+		QualityClipmap16PresetCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Preset.QualityClipmap16"),
+			TEXT("Apply the experimental Source=6 quality preset: 16x16 cache, receiver-plane bias, stable 3x3 PCF."),
+			FConsoleCommandDelegate::CreateRaw(this, &FShadowModule::ApplyQualityClipmap16Preset),
 			ECVF_Default);
 	}
 
@@ -111,16 +179,84 @@ public:
 			IConsoleManager::Get().UnregisterConsoleObject(RunCacheStrategyRegressionCommand);
 			RunCacheStrategyRegressionCommand = nullptr;
 		}
+		if (RunQualityRegressionCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(RunQualityRegressionCommand);
+			RunQualityRegressionCommand = nullptr;
+		}
 		if (StopBenchmarkCommand)
 		{
 			IConsoleManager::Get().UnregisterConsoleObject(StopBenchmarkCommand);
 			StopBenchmarkCommand = nullptr;
+		}
+		if (HardClipmap16PresetCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(HardClipmap16PresetCommand);
+			HardClipmap16PresetCommand = nullptr;
+		}
+		if (LowMemoryHardClipmap8PresetCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(LowMemoryHardClipmap8PresetCommand);
+			LowMemoryHardClipmap8PresetCommand = nullptr;
+		}
+		if (QualityClipmap16PresetCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(QualityClipmap16PresetCommand);
+			QualityClipmap16PresetCommand = nullptr;
 		}
 
 		FDefaultGameModuleImpl::ShutdownModule();
 	}
 
 private:
+	void ApplyHardClipmap16Preset()
+	{
+		ApplyCommonSource6Preset();
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchRadius"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchBudget"), 32);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
+		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.HardClipmap16."));
+	}
+
+	void ApplyLowMemoryHardClipmap8Preset()
+	{
+		ApplyCommonSource6Preset();
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"), 8);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"), 8);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchRadius"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchBudget"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
+		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.LowMemoryHardClipmap8."));
+	}
+
+	void ApplyQualityClipmap16Preset()
+	{
+		ApplyCommonSource6Preset();
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchRadius"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchBudget"), 32);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 2);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFKernel"), 3);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels"), 1.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"), 24.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale"), 1.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp"), 0.01f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"), 0.5f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
+		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.QualityClipmap16."));
+	}
+
 	FMHShadowBenchmarkRunner BenchmarkRunner;
 	IConsoleObject* RunBenchmarkCommand = nullptr;
 	IConsoleObject* CaptureCurrentCommand = nullptr;
@@ -130,7 +266,11 @@ private:
 	IConsoleObject* RunCellProviderRegressionCommand = nullptr;
 	IConsoleObject* RunRealClipmapRegressionCommand = nullptr;
 	IConsoleObject* RunCacheStrategyRegressionCommand = nullptr;
+	IConsoleObject* RunQualityRegressionCommand = nullptr;
 	IConsoleObject* StopBenchmarkCommand = nullptr;
+	IConsoleObject* HardClipmap16PresetCommand = nullptr;
+	IConsoleObject* LowMemoryHardClipmap8PresetCommand = nullptr;
+	IConsoleObject* QualityClipmap16PresetCommand = nullptr;
 };
 
 IMPLEMENT_PRIMARY_GAME_MODULE(FShadowModule, shadow, "shadow");
