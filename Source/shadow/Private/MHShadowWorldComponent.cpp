@@ -33,6 +33,12 @@ static FMatrix44f MakeWorldToShadowMatrix(const FMHShadowCellFlattenedData& Data
 		FPlane(Data.WorldToShadowRow2.X, Data.WorldToShadowRow2.Y, Data.WorldToShadowRow2.Z, Data.WorldToShadowRow2.W),
 		FPlane(Data.WorldToShadowRow3.X, Data.WorldToShadowRow3.Y, Data.WorldToShadowRow3.Z, Data.WorldToShadowRow3.W)));
 }
+
+static bool ShouldRegisterWithRenderer(const UActorComponent& Component, bool bRegisterInEditorWorld)
+{
+	const UWorld* World = Component.GetWorld();
+	return World && (World->IsGameWorld() || bRegisterInEditorWorld);
+}
 }
 
 UMHShadowWorldComponent::UMHShadowWorldComponent()
@@ -96,6 +102,12 @@ void UMHShadowWorldComponent::PostEditChangeProperty(FPropertyChangedEvent& Prop
 void UMHShadowWorldComponent::RegisterShadowData()
 {
 #if WITH_MH_STATIC_SHADOW_RENDERER
+	if (!ShouldRegisterWithRenderer(*this, bRegisterInEditorWorld))
+	{
+		UnregisterShadowData();
+		return;
+	}
+
 	if (!WorldData || !WorldData->IsValidWorldData())
 	{
 		if (WorldData)

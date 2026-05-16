@@ -20,6 +20,7 @@ public:
 	void StartClipmapRegressionBenchmark();
 	void StartClipmapDegenerationBenchmark();
 	void StartCellProviderRegressionBenchmark();
+	void StartRealClipmapRegressionBenchmark();
 	void CaptureCurrent();
 	void StopBenchmark();
 
@@ -30,7 +31,8 @@ private:
 		LargeCacheStress,
 		ClipmapRegression,
 		ClipmapDegeneration,
-		CellProviderRegression
+		CellProviderRegression,
+		RealClipmapRegression
 	};
 
 	struct FCameraSpec
@@ -80,7 +82,26 @@ private:
 		double MinLuma = 0.0;
 		double MaxLuma = 0.0;
 		double NonBlackPercent = 0.0;
+		double MeanVisibility = 0.0;
+		double MinVisibility = 0.0;
+		double MaxVisibility = 0.0;
+		double NearWhitePercent = 0.0;
+		double NearBlackPercent = 0.0;
 		FString Notes;
+	};
+
+	struct FHardShadowSanityRow
+	{
+		FString Camera;
+		FString Source;
+		FString Filename;
+		double MeanVisibility = 0.0;
+		double MinVisibility = 0.0;
+		double MaxVisibility = 0.0;
+		double NearWhitePercent = 0.0;
+		double NearBlackPercent = 0.0;
+		FString Status;
+		FString Details;
 	};
 
 	struct FDiffRow
@@ -171,6 +192,10 @@ private:
 	void BuildClipmapRegressionPlan();
 	void BuildClipmapDegenerationPlan();
 	void BuildCellProviderRegressionPlan();
+	void BuildRealClipmapRegressionPlan();
+	void NormalizeHardShadowCaptureCommands();
+	bool IsHardShadowSanityCapture(const FCaptureSpec& Capture) const;
+	FString MakeHardShadowSanityStatus(const FCaptureSpec& Capture, double MinVisibility, double MaxVisibility, double NearWhitePercent, double NearBlackPercent, FString& OutDetails) const;
 	void StartNextStep();
 	void FinishBenchmark();
 	void ApplyStep(const FBenchmarkStep& Step);
@@ -178,6 +203,8 @@ private:
 	void DestroyBenchmarkCamera();
 	bool EnsureLargeCacheStressData(UWorld& World);
 	UMHShadowDataAsset* LoadLargeCacheStressDataAsset() const;
+	UMHShadowDataAsset* LoadRealClipmapDataAsset() const;
+	UMHShadowDataAsset* LoadActiveBenchmarkDataAsset() const;
 	bool ConfigureShadowProvider(UWorld& World, const FCaptureSpec& Capture);
 	void Exec(UWorld* World, const FString& Command) const;
 	UWorld* GetBenchmarkWorld() const;
@@ -201,6 +228,7 @@ private:
 	TArray<FDiffRow> DiffRows;
 	TArray<FDiffRow> StabilityRows;
 	TArray<FCaptureStatsRow> CaptureStatsRows;
+	TArray<FHardShadowSanityRow> HardShadowSanityRows;
 	TArray<FPairwiseSpec> PairwiseSpecs;
 	TMap<FString, TArray<float>> AtlasBaselineByCamera;
 	TMap<FString, TArray<float>> ClipmapFirstByCamera;

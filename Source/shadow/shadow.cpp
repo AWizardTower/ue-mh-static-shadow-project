@@ -48,6 +48,12 @@ public:
 			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartCellProviderRegressionBenchmark),
 			ECVF_Default);
 
+		RunRealClipmapRegressionCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Benchmark.RunRealClipmapRegression"),
+			TEXT("Run the MH static shadow real multi-range clipmap regression benchmark in PIE or Standalone."),
+			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartRealClipmapRegressionBenchmark),
+			ECVF_Default);
+
 		StopBenchmarkCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("MHShadow.Benchmark.Stop"),
 			TEXT("Stop the active MH static shadow benchmark."),
@@ -89,6 +95,11 @@ public:
 			IConsoleManager::Get().UnregisterConsoleObject(RunCellProviderRegressionCommand);
 			RunCellProviderRegressionCommand = nullptr;
 		}
+		if (RunRealClipmapRegressionCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(RunRealClipmapRegressionCommand);
+			RunRealClipmapRegressionCommand = nullptr;
+		}
 		if (StopBenchmarkCommand)
 		{
 			IConsoleManager::Get().UnregisterConsoleObject(StopBenchmarkCommand);
@@ -106,6 +117,7 @@ private:
 	IConsoleObject* RunClipmapRegressionCommand = nullptr;
 	IConsoleObject* RunClipmapDegenerationCommand = nullptr;
 	IConsoleObject* RunCellProviderRegressionCommand = nullptr;
+	IConsoleObject* RunRealClipmapRegressionCommand = nullptr;
 	IConsoleObject* StopBenchmarkCommand = nullptr;
 };
 

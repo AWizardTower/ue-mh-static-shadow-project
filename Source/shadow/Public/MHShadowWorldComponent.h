@@ -22,6 +22,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow|World")
 	bool bAutoRegisterWorld = true;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MH Shadow|World", AdvancedDisplay)
+	bool bRegisterInEditorWorld = false;
+
 	virtual void OnRegister() override;
 	virtual void OnUnregister() override;
 	virtual void BeginPlay() override;

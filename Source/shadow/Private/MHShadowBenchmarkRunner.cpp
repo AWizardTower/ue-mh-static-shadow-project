@@ -24,6 +24,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogMHShadowBenchmark, Log, All);
 namespace
 {
 	constexpr double DiffThreshold = 0.05;
+	const TCHAR* const GRealClipmapTunedRestoredDepthBiasAdd = TEXT("0.01");
 
 	FString CsvEscape(const FString& Value)
 	{
@@ -114,16 +115,17 @@ namespace
 	FString FindCommandValue(const TArray<FString>& Commands, const TCHAR* CVarName, const TCHAR* DefaultValue = TEXT("-"))
 	{
 		const FString Prefix = FString(CVarName) + TEXT(" ");
+		FString LastValue;
 		for (const FString& Command : Commands)
 		{
 			if (Command.StartsWith(Prefix, ESearchCase::IgnoreCase))
 			{
 				FString Value = Command.RightChop(Prefix.Len());
 				Value.TrimStartAndEndInline();
-				return Value;
+				LastValue = Value;
 			}
 		}
-		return DefaultValue;
+		return LastValue.IsEmpty() ? FString(DefaultValue) : LastValue;
 	}
 
 	FString JoinCommandsForCsv(const TArray<FString>& Commands)
@@ -138,6 +140,27 @@ namespace
 			Joined += Commands[Index];
 		}
 		return Joined;
+	}
+
+	void UpsertCommand(TArray<FString>& Commands, const TCHAR* CVarName, const TCHAR* Value)
+	{
+		const FString Prefix = FString(CVarName) + TEXT(" ");
+		const FString NewCommand = Prefix + Value;
+		for (FString& Command : Commands)
+		{
+			if (Command.StartsWith(Prefix, ESearchCase::IgnoreCase))
+			{
+				Command = NewCommand;
+				return;
+			}
+		}
+		Commands.Add(NewCommand);
+	}
+
+	int32 FindCommandInt(const TArray<FString>& Commands, const TCHAR* CVarName, int32 DefaultValue)
+	{
+		const FString Value = FindCommandValue(Commands, CVarName, TEXT(""));
+		return Value.IsEmpty() ? DefaultValue : FCString::Atoi(*Value);
 	}
 }
 
@@ -173,6 +196,11 @@ void FMHShadowBenchmarkRunner::StartCellProviderRegressionBenchmark()
 	StartBenchmarkInternal(EBenchmarkProfile::CellProviderRegression);
 }
 
+void FMHShadowBenchmarkRunner::StartRealClipmapRegressionBenchmark()
+{
+	StartBenchmarkInternal(EBenchmarkProfile::RealClipmapRegression);
+}
+
 void FMHShadowBenchmarkRunner::StartBenchmarkInternal(EBenchmarkProfile Profile)
 {
 	if (bRunning)
@@ -189,8 +217,9 @@ void FMHShadowBenchmarkRunner::StartBenchmarkInternal(EBenchmarkProfile Profile)
 	}
 
 	BuildBenchmarkPlan(Profile);
+	NormalizeHardShadowCaptureCommands();
 
-	if ((Profile == EBenchmarkProfile::LargeCacheStress || Profile == EBenchmarkProfile::ClipmapRegression || Profile == EBenchmarkProfile::ClipmapDegeneration) && !EnsureLargeCacheStressData(*World))
+	if ((Profile == EBenchmarkProfile::LargeCacheStress || Profile == EBenchmarkProfile::ClipmapRegression || Profile == EBenchmarkProfile::ClipmapDegeneration || Profile == EBenchmarkProfile::RealClipmapRegression) && !EnsureLargeCacheStressData(*World))
 	{
 		return;
 	}
@@ -203,6 +232,7 @@ void FMHShadowBenchmarkRunner::StartBenchmarkInternal(EBenchmarkProfile Profile)
 	DiffRows.Reset();
 	StabilityRows.Reset();
 	CaptureStatsRows.Reset();
+	HardShadowSanityRows.Reset();
 	AtlasBaselineByCamera.Reset();
 	ClipmapFirstByCamera.Reset();
 	CaptureLumaByKey.Reset();
@@ -220,13 +250,13 @@ void FMHShadowBenchmarkRunner::StartBenchmarkInternal(EBenchmarkProfile Profile)
 	Exec(World, TEXT("r.Shadow.MHStatic.Stats.Reset 1"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Stats.Enable 1"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Stats.CSV 1"));
-	Exec(World, (Profile == EBenchmarkProfile::ClipmapRegression || Profile == EBenchmarkProfile::ClipmapDegeneration || Profile == EBenchmarkProfile::CellProviderRegression) ? TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 1") : (Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 2") : TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 10")));
+	Exec(World, (Profile == EBenchmarkProfile::ClipmapRegression || Profile == EBenchmarkProfile::ClipmapDegeneration || Profile == EBenchmarkProfile::CellProviderRegression || Profile == EBenchmarkProfile::RealClipmapRegression) ? TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 1") : (Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 2") : TEXT("r.Shadow.MHStatic.Stats.CSVEveryNFrames 10")));
 	Exec(World, TEXT("r.Shadow.MHStatic.Feedback.Enable 1"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Cache.Enable 1"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX 8"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY 8"));
 	Exec(World, Profile == EBenchmarkProfile::LargeCacheStress ? TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 8") : TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 64"));
-	Exec(World, Profile == EBenchmarkProfile::BakeTest ? TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 3") : TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 4"));
+	Exec(World, Profile == EBenchmarkProfile::BakeTest || Profile == EBenchmarkProfile::RealClipmapRegression ? TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 3") : TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 4"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance 1600"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale 2"));
 	Exec(World, TEXT("r.Shadow.MHStatic.Clipmap.FineLevelBias 1"));
@@ -328,6 +358,10 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan(EBenchmarkProfile Profile)
 	{
 		BuildCellProviderRegressionPlan();
 	}
+	else if (Profile == EBenchmarkProfile::RealClipmapRegression)
+	{
+		BuildRealClipmapRegressionPlan();
+	}
 	else if (Profile == EBenchmarkProfile::LargeCacheStress)
 	{
 		BuildLargeCacheStressPlan();
@@ -336,6 +370,71 @@ void FMHShadowBenchmarkRunner::BuildBenchmarkPlan(EBenchmarkProfile Profile)
 	{
 		BuildBakeTestPlan();
 	}
+}
+
+void FMHShadowBenchmarkRunner::NormalizeHardShadowCaptureCommands()
+{
+	for (FCaptureSpec& Capture : Captures)
+	{
+		if (!IsHardShadowSanityCapture(Capture))
+		{
+			continue;
+		}
+
+		if (Capture.Name.Contains(TEXT("ZeroRestoredBias"))
+			|| Capture.Name.Contains(TEXT("DefaultRestoredBias"))
+			|| Capture.Name.Contains(TEXT("SuppressionCheck")))
+		{
+			continue;
+		}
+
+		UpsertCommand(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), TEXT("0"));
+		UpsertCommand(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), TEXT("0"));
+		UpsertCommand(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), GRealClipmapTunedRestoredDepthBiasAdd);
+	}
+}
+
+bool FMHShadowBenchmarkRunner::IsHardShadowSanityCapture(const FCaptureSpec& Capture) const
+{
+	const int32 Debug = FindCommandInt(Capture.Commands, TEXT("r.Shadow.MHStatic.Debug"), 0);
+	const int32 Source = FindCommandInt(Capture.Commands, TEXT("r.Shadow.MHStatic.Source"), -1);
+	return Debug == 1 && (Source == 2 || Source == 4 || Source == 5 || Source == 6);
+}
+
+FString FMHShadowBenchmarkRunner::MakeHardShadowSanityStatus(const FCaptureSpec& Capture, double MinVisibility, double MaxVisibility, double NearWhitePercent, double NearBlackPercent, FString& OutDetails) const
+{
+	const double VisibilityRange = MaxVisibility - MinVisibility;
+	const bool bNearlyFlat = VisibilityRange < 0.10;
+	const bool bMostlyWhite = NearWhitePercent > 98.0;
+	const bool bMostlyBlack = NearBlackPercent > 98.0;
+
+	OutDetails = FString::Printf(TEXT("range=%.6f nearWhite=%.3f nearBlack=%.3f"), VisibilityRange, NearWhitePercent, NearBlackPercent);
+
+	if (Capture.Name.Contains(TEXT("DefaultRestoredBias")) || Capture.Name.Contains(TEXT("SuppressionCheck")))
+	{
+		if (bMostlyWhite || bNearlyFlat)
+		{
+			return TEXT("BiasSuppressedShadow");
+		}
+		return TEXT("DefaultBiasStillHasShadow");
+	}
+
+	if (bMostlyWhite)
+	{
+		return TEXT("LikelyNoCastShadow");
+	}
+
+	if (bMostlyBlack)
+	{
+		return TEXT("LikelyFullyShadowed");
+	}
+
+	if (bNearlyFlat)
+	{
+		return TEXT("LowVisibilityRange");
+	}
+
+	return TEXT("OK");
 }
 
 void FMHShadowBenchmarkRunner::BuildBakeTestPlan()
@@ -1015,6 +1114,173 @@ void FMHShadowBenchmarkRunner::BuildCellProviderRegressionPlan()
 	}
 }
 
+void FMHShadowBenchmarkRunner::BuildRealClipmapRegressionPlan()
+{
+	ActiveProfileName = TEXT("RealClipmapRegression");
+	Cameras.Reset();
+	Captures.Reset();
+	Steps.Reset();
+	PairwiseSpecs.Reset();
+
+	Cameras.Add({ TEXT("OverviewHigh"), FVector(-6200.0, -6200.0, 3600.0), FVector(0.0, 0.0, 180.0) });
+	Cameras.Add({ TEXT("CenterA"), FVector(-1700.0, -1800.0, 560.0), FVector(800.0, 900.0, 160.0) });
+	Cameras.Add({ TEXT("EastRun"), FVector(5600.0, -1300.0, 700.0), FVector(2600.0, 1300.0, 170.0) });
+	Cameras.Add({ TEXT("FarCorner"), FVector(5600.0, 5600.0, 940.0), FVector(2500.0, 2500.0, 180.0) });
+	Cameras.Add({ TEXT("ContactA"), FVector(-2500.0, 300.0, 320.0), FVector(-1800.0, 600.0, 130.0) });
+	Cameras.Add({ TEXT("ReturnOverview"), FVector(-6200.0, -6200.0, 3600.0), FVector(0.0, 0.0, 180.0) });
+
+	const TArray<FString> StableCaptureCommands = {
+		TEXT("r.ScreenPercentage 100"),
+		TEXT("r.PostProcessAAQuality 0"),
+		TEXT("r.AntiAliasingMethod 0"),
+		TEXT("r.TemporalAA.Upsampling 0"),
+		TEXT("r.MotionBlurQuality 0"),
+		TEXT("r.EyeAdaptationQuality 0")
+	};
+
+	TArray<FString> RealClipmapAllResident = StableCaptureCommands;
+	RealClipmapAllResident.Append({
+		TEXT("r.Shadow.MHStatic.Enable 1"),
+		TEXT("r.Shadow.MHStatic.Mode 3"),
+		TEXT("r.Shadow.MHStatic.Source 6"),
+		TEXT("r.Shadow.MHStatic.Debug 1"),
+		TEXT("r.Shadow.MHStatic.DepthTest 0"),
+		TEXT("r.Shadow.MHStatic.DepthBiasScale 0"),
+		TEXT("r.Shadow.MHStatic.DepthBiasAdd 0"),
+		TEXT("r.Shadow.MHStatic.Cache.Enable 0"),
+		TEXT("r.Shadow.MHStatic.Feedback.Enable 0"),
+		TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 3"),
+		TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance 1600"),
+		TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale 2"),
+		TEXT("r.Shadow.MHStatic.Clipmap.FineLevelBias 1"),
+		TEXT("r.Shadow.MHStatic.Clipmap.FallbackMaxCoarserLevels 3")
+	});
+
+	FCaptureSpec MonolithicAllResident;
+	MonolithicAllResident.Name = TEXT("RealClipmap_Monolithic_AllResident");
+	MonolithicAllResident.Commands = RealClipmapAllResident;
+	MonolithicAllResident.SettleFrames = 12;
+	MonolithicAllResident.bAtlasBaseline = true;
+	MonolithicAllResident.bResetCacheAtRouteStart = true;
+	MonolithicAllResident.Notes = TEXT("Merged real multi-range clipmap asset, monolithic provider, all resident.");
+	MonolithicAllResident.ProviderMode = EShadowProviderMode::Monolithic;
+	Captures.Add(MonolithicAllResident);
+
+	FCaptureSpec ZeroBiasHardBaseline = MonolithicAllResident;
+	ZeroBiasHardBaseline.Name = TEXT("Source6_ZeroRestoredBias_HardBaseline");
+	ZeroBiasHardBaseline.bAtlasBaseline = false;
+	ZeroBiasHardBaseline.bCompareToAtlas = true;
+	UpsertCommand(ZeroBiasHardBaseline.Commands, TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), TEXT("0"));
+	UpsertCommand(ZeroBiasHardBaseline.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), TEXT("0"));
+	UpsertCommand(ZeroBiasHardBaseline.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), TEXT("0"));
+	ZeroBiasHardBaseline.Notes = TEXT("Explicit zero-restored-bias Source=6 hard-shadow baseline used to detect all-lit false passes.");
+	Captures.Add(ZeroBiasHardBaseline);
+
+	FCaptureSpec TunedBiasHardBaseline = MonolithicAllResident;
+	TunedBiasHardBaseline.Name = TEXT("Source6_TunedBias_HardBaseline");
+	TunedBiasHardBaseline.bAtlasBaseline = false;
+	TunedBiasHardBaseline.bCompareToAtlas = true;
+	UpsertCommand(TunedBiasHardBaseline.Commands, TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), TEXT("0"));
+	UpsertCommand(TunedBiasHardBaseline.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), TEXT("0"));
+	UpsertCommand(TunedBiasHardBaseline.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), GRealClipmapTunedRestoredDepthBiasAdd);
+	TunedBiasHardBaseline.Notes = TEXT("Tuned Stage 3 hard-shadow baseline: manual bias 0.01 keeps cast shadows while suppressing zero-bias acne; Stage 5 should replace this with level-aware automatic bias.");
+	Captures.Add(TunedBiasHardBaseline);
+
+	FCaptureSpec DefaultBiasSuppression = MonolithicAllResident;
+	DefaultBiasSuppression.Name = TEXT("Source6_DefaultRestoredBias_SuppressionCheck");
+	DefaultBiasSuppression.bAtlasBaseline = false;
+	DefaultBiasSuppression.bCompareToAtlas = true;
+	DefaultBiasSuppression.Commands = RealClipmapAllResident;
+	UpsertCommand(DefaultBiasSuppression.Commands, TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), TEXT("0"));
+	UpsertCommand(DefaultBiasSuppression.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), TEXT("1"));
+	UpsertCommand(DefaultBiasSuppression.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), TEXT("0"));
+	DefaultBiasSuppression.Notes = TEXT("Old default restored-bias route; large differences from zero-bias indicate bias suppressed cast shadows.");
+	Captures.Add(DefaultBiasSuppression);
+
+	FCaptureSpec CellAllResident;
+	CellAllResident.Name = TEXT("RealClipmap_CellProvider_AllLoaded");
+	CellAllResident.Commands = RealClipmapAllResident;
+	CellAllResident.SettleFrames = 12;
+	CellAllResident.bResetCacheAtRouteStart = true;
+	CellAllResident.Notes = TEXT("Real multi-range clipmap through cell provider; all cells loaded.");
+	CellAllResident.ProviderMode = EShadowProviderMode::CellProvider;
+	Captures.Add(CellAllResident);
+
+	FCaptureSpec CellCache;
+	CellCache.Name = TEXT("RealClipmap_CellProvider_8x8Cache");
+	CellCache.Commands = StableCaptureCommands;
+	CellCache.Commands.Append({
+		TEXT("r.Shadow.MHStatic.Enable 1"),
+		TEXT("r.Shadow.MHStatic.Mode 3"),
+		TEXT("r.Shadow.MHStatic.Source 6"),
+		TEXT("r.Shadow.MHStatic.Debug 1"),
+		TEXT("r.Shadow.MHStatic.DepthTest 0"),
+		TEXT("r.Shadow.MHStatic.DepthBiasScale 0"),
+		TEXT("r.Shadow.MHStatic.DepthBiasAdd 0"),
+		TEXT("r.Shadow.MHStatic.Cache.Enable 1"),
+		TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX 8"),
+		TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY 8"),
+		TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame 16"),
+		TEXT("r.Shadow.MHStatic.Feedback.Enable 1"),
+		TEXT("r.Shadow.MHStatic.Clipmap.LevelCount 3"),
+		TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance 1600"),
+		TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale 2"),
+		TEXT("r.Shadow.MHStatic.Clipmap.FineLevelBias 1"),
+		TEXT("r.Shadow.MHStatic.Clipmap.FallbackMaxCoarserLevels 3")
+	});
+	CellCache.SettleFrames = 16;
+	CellCache.bResetCacheAtRouteStart = true;
+	CellCache.bCompareToAtlas = true;
+	CellCache.Notes = TEXT("Real multi-range clipmap through cell provider with limited physical page cache.");
+	CellCache.ProviderMode = EShadowProviderMode::CellProvider;
+	Captures.Add(CellCache);
+
+	FCaptureSpec LevelDebug = CellCache;
+	LevelDebug.Name = TEXT("RealClipmap_LevelDebug");
+	LevelDebug.Commands.Add(TEXT("r.Shadow.MHStatic.Debug 18"));
+	LevelDebug.SettleFrames = 8;
+	LevelDebug.bCompareToAtlas = false;
+	LevelDebug.Notes = TEXT("Selected clipmap level visualization.");
+	Captures.Add(LevelDebug);
+
+	FCaptureSpec ResolvedDebug = CellCache;
+	ResolvedDebug.Name = TEXT("RealClipmap_ResolvedLevelDebug");
+	ResolvedDebug.Commands.Add(TEXT("r.Shadow.MHStatic.Debug 21"));
+	ResolvedDebug.SettleFrames = 8;
+	ResolvedDebug.bCompareToAtlas = false;
+	ResolvedDebug.Notes = TEXT("Resolved/fallback clipmap level visualization.");
+	Captures.Add(ResolvedDebug);
+
+	FCaptureSpec CoverageDebug = CellCache;
+	CoverageDebug.Name = TEXT("RealClipmap_UVCoverageDebug");
+	CoverageDebug.Commands.Add(TEXT("r.Shadow.MHStatic.Debug 22"));
+	CoverageDebug.SettleFrames = 8;
+	CoverageDebug.bCompareToAtlas = false;
+	CoverageDebug.Notes = TEXT("Per-level UV coverage visualization for real multi-range matrices.");
+	Captures.Add(CoverageDebug);
+
+	FCaptureSpec FallbackDebug = CellCache;
+	FallbackDebug.Name = TEXT("RealClipmap_FallbackDebug");
+	FallbackDebug.Commands.Add(TEXT("r.Shadow.MHStatic.Debug 20"));
+	FallbackDebug.SettleFrames = 8;
+	FallbackDebug.bCompareToAtlas = false;
+	FallbackDebug.Notes = TEXT("Miss/fallback visualization for real multi-range clipmap.");
+	Captures.Add(FallbackDebug);
+
+	PairwiseSpecs.Add({ TEXT("RealClipmap_CellProvider_AllLoaded"), TEXT("RealClipmap_Monolithic_AllResident") });
+	PairwiseSpecs.Add({ TEXT("RealClipmap_CellProvider_8x8Cache"), TEXT("RealClipmap_Monolithic_AllResident") });
+	PairwiseSpecs.Add({ TEXT("Source6_DefaultRestoredBias_SuppressionCheck"), TEXT("Source6_TunedBias_HardBaseline") });
+	PairwiseSpecs.Add({ TEXT("Source6_ZeroRestoredBias_HardBaseline"), TEXT("Source6_TunedBias_HardBaseline") });
+
+	for (int32 CaptureIndex = 0; CaptureIndex < Captures.Num(); ++CaptureIndex)
+	{
+		for (int32 CameraIndex = 0; CameraIndex < Cameras.Num(); ++CameraIndex)
+		{
+			Steps.Add({ CameraIndex, CaptureIndex });
+		}
+	}
+}
+
 void FMHShadowBenchmarkRunner::BuildClipmapRegressionPlan()
 {
 	ActiveProfileName = TEXT("ClipmapRegression");
@@ -1417,10 +1683,10 @@ void FMHShadowBenchmarkRunner::DestroyBenchmarkCamera()
 
 bool FMHShadowBenchmarkRunner::EnsureLargeCacheStressData(UWorld& World)
 {
-	UMHShadowDataAsset* StressAsset = LoadLargeCacheStressDataAsset();
+	UMHShadowDataAsset* StressAsset = LoadActiveBenchmarkDataAsset();
 	if (!StressAsset || !StressAsset->IsValidForRendering())
 	{
-		UE_LOG(LogMHShadowBenchmark, Error, TEXT("LargeCacheStress benchmark needs a valid monolithic asset. Build lighting and import with MHShadowImportLightmassDual first."));
+		UE_LOG(LogMHShadowBenchmark, Error, TEXT("%s benchmark needs a valid monolithic MH shadow asset. Build/import/merge data first."), *ActiveProfileName);
 		return false;
 	}
 
@@ -1469,6 +1735,19 @@ UMHShadowDataAsset* FMHShadowBenchmarkRunner::LoadLargeCacheStressDataAsset() co
 	return LoadObject<UMHShadowDataAsset>(nullptr, FallbackPath);
 }
 
+UMHShadowDataAsset* FMHShadowBenchmarkRunner::LoadRealClipmapDataAsset() const
+{
+	const TCHAR* FinalPath = TEXT("/Game/MHShadow/Baked/MHShadowData_LightmassDual_LargeCacheStress_RealClipmap.MHShadowData_LightmassDual_LargeCacheStress_RealClipmap");
+	return LoadObject<UMHShadowDataAsset>(nullptr, FinalPath);
+}
+
+UMHShadowDataAsset* FMHShadowBenchmarkRunner::LoadActiveBenchmarkDataAsset() const
+{
+	return ActiveProfileName == TEXT("RealClipmapRegression")
+		? LoadRealClipmapDataAsset()
+		: LoadLargeCacheStressDataAsset();
+}
+
 bool FMHShadowBenchmarkRunner::ConfigureShadowProvider(UWorld& World, const FCaptureSpec& Capture)
 {
 	const EShadowProviderMode ProviderMode = Capture.ProviderMode;
@@ -1477,7 +1756,7 @@ bool FMHShadowBenchmarkRunner::ConfigureShadowProvider(UWorld& World, const FCap
 		return true;
 	}
 
-	UMHShadowDataAsset* StressAsset = LoadLargeCacheStressDataAsset();
+	UMHShadowDataAsset* StressAsset = LoadActiveBenchmarkDataAsset();
 	if (ProviderMode == EShadowProviderMode::Monolithic && (!StressAsset || !StressAsset->IsValidForRendering()))
 	{
 		UE_LOG(LogMHShadowBenchmark, Error, TEXT("CellProviderRegression monolithic route needs a valid LargeCacheStress monolithic asset."));
@@ -1489,101 +1768,81 @@ bool FMHShadowBenchmarkRunner::ConfigureShadowProvider(UWorld& World, const FCap
 	int32 DisabledCellCount = 0;
 	int32 ExpectedUnavailablePages = 0;
 	TArray<UMHShadowWorldComponent*> BenchmarkWorldComponentsToRegister;
-	for (const FWorldContext& Context : GEngine->GetWorldContexts())
+	for (TActorIterator<AActor> It(&World); It; ++It)
 	{
-		UWorld* CandidateWorld = Context.World();
-		if (!CandidateWorld)
+		AActor* Actor = *It;
+		if (!Actor)
 		{
 			continue;
 		}
 
-		const bool bIsBenchmarkWorld = CandidateWorld == &World;
-		for (TActorIterator<AActor> It(CandidateWorld); It; ++It)
+		TArray<UMHShadowComponent*> MHComponents;
+		Actor->GetComponents<UMHShadowComponent>(MHComponents);
+		for (UMHShadowComponent* MHComponent : MHComponents)
 		{
-			AActor* Actor = *It;
-			if (!Actor)
+			if (!MHComponent)
 			{
 				continue;
 			}
 
-			TArray<UMHShadowComponent*> MHComponents;
-			Actor->GetComponents<UMHShadowComponent>(MHComponents);
-			for (UMHShadowComponent* MHComponent : MHComponents)
+			MHComponent->UnregisterShadowData();
+			if (ProviderMode == EShadowProviderMode::Monolithic)
 			{
-				if (!MHComponent)
-				{
-					continue;
-				}
+				MHComponent->ShadowData = StressAsset;
+				MHComponent->RegisterShadowData();
+			}
+			else
+			{
+				MHComponent->ShadowData = nullptr;
+			}
+			++MHComponentCount;
+		}
 
-				MHComponent->UnregisterShadowData();
-				if (bIsBenchmarkWorld)
-				{
-					if (ProviderMode == EShadowProviderMode::Monolithic)
-					{
-						MHComponent->ShadowData = StressAsset;
-						MHComponent->RegisterShadowData();
-					}
-					else
-					{
-						MHComponent->ShadowData = nullptr;
-					}
-					++MHComponentCount;
-				}
+		TArray<UMHShadowCellComponent*> CellComponents;
+		Actor->GetComponents<UMHShadowCellComponent>(CellComponents);
+		for (UMHShadowCellComponent* CellComponent : CellComponents)
+		{
+			if (!CellComponent)
+			{
+				continue;
 			}
 
-			TArray<UMHShadowCellComponent*> CellComponents;
-			Actor->GetComponents<UMHShadowCellComponent>(CellComponents);
-			for (UMHShadowCellComponent* CellComponent : CellComponents)
+			bool bCellEnabled = ProviderMode == EShadowProviderMode::CellProvider;
+			if (bCellEnabled && Capture.CellDisableModulo > 0 && CellComponent->CellData)
 			{
-				if (!CellComponent)
+				const int32 CellIndex = CellComponent->CellData->CellIndex;
+				const int32 NormalizedRemainder = ((Capture.CellDisableRemainder % Capture.CellDisableModulo) + Capture.CellDisableModulo) % Capture.CellDisableModulo;
+				const int32 CellRemainder = CellIndex >= 0 ? CellIndex % Capture.CellDisableModulo : INDEX_NONE;
+				if (CellIndex >= 0 && CellRemainder == NormalizedRemainder)
 				{
-					continue;
-				}
-
-				bool bCellEnabled = false;
-				if (bIsBenchmarkWorld && ProviderMode == EShadowProviderMode::CellProvider)
-				{
-					bCellEnabled = true;
-					if (Capture.CellDisableModulo > 0 && CellComponent->CellData)
-					{
-						const int32 CellIndex = CellComponent->CellData->CellIndex;
-						const int32 NormalizedRemainder = ((Capture.CellDisableRemainder % Capture.CellDisableModulo) + Capture.CellDisableModulo) % Capture.CellDisableModulo;
-						const int32 CellRemainder = CellIndex >= 0 ? CellIndex % Capture.CellDisableModulo : INDEX_NONE;
-						if (CellIndex >= 0 && CellRemainder == NormalizedRemainder)
-						{
-							bCellEnabled = false;
-							++DisabledCellCount;
-							ExpectedUnavailablePages += CellComponent->CellData->GlobalClipmapTileIndices.Num();
-						}
-					}
-				}
-				CellComponent->bAutoRegisterCell = bCellEnabled;
-			}
-
-			TArray<UMHShadowWorldComponent*> WorldComponents;
-			Actor->GetComponents<UMHShadowWorldComponent>(WorldComponents);
-			for (UMHShadowWorldComponent* WorldComponent : WorldComponents)
-			{
-				if (!WorldComponent)
-				{
-					continue;
-				}
-
-				WorldComponent->UnregisterShadowData();
-				if (bIsBenchmarkWorld)
-				{
-					if (ProviderMode == EShadowProviderMode::Monolithic)
-					{
-						WorldComponent->bAutoRegisterWorld = false;
-					}
-					else
-					{
-						WorldComponent->bAutoRegisterWorld = true;
-						BenchmarkWorldComponentsToRegister.Add(WorldComponent);
-					}
-					++WorldComponentCount;
+					bCellEnabled = false;
+					++DisabledCellCount;
+					ExpectedUnavailablePages += CellComponent->CellData->GlobalClipmapTileIndices.Num();
 				}
 			}
+			CellComponent->bAutoRegisterCell = bCellEnabled;
+		}
+
+		TArray<UMHShadowWorldComponent*> WorldComponents;
+		Actor->GetComponents<UMHShadowWorldComponent>(WorldComponents);
+		for (UMHShadowWorldComponent* WorldComponent : WorldComponents)
+		{
+			if (!WorldComponent)
+			{
+				continue;
+			}
+
+			WorldComponent->UnregisterShadowData();
+			if (ProviderMode == EShadowProviderMode::Monolithic)
+			{
+				WorldComponent->bAutoRegisterWorld = false;
+			}
+			else
+			{
+				WorldComponent->bAutoRegisterWorld = true;
+				BenchmarkWorldComponentsToRegister.Add(WorldComponent);
+			}
+			++WorldComponentCount;
 		}
 	}
 
@@ -1699,6 +1958,8 @@ void FMHShadowBenchmarkRunner::RecordCapture(const FBenchmarkStep& Step, const F
 	double MinLuma = Luma.Num() > 0 ? 1.0 : 0.0;
 	double MaxLuma = 0.0;
 	int32 NonBlackPixels = 0;
+	int32 NearWhitePixels = 0;
+	int32 NearBlackPixels = 0;
 	for (const float Value : Luma)
 	{
 		LumaSum += Value;
@@ -1708,9 +1969,19 @@ void FMHShadowBenchmarkRunner::RecordCapture(const FBenchmarkStep& Step, const F
 		{
 			++NonBlackPixels;
 		}
+		if (Value >= 0.98f)
+		{
+			++NearWhitePixels;
+		}
+		if (Value <= 0.02f)
+		{
+			++NearBlackPixels;
+		}
 	}
 	const double MeanLuma = Luma.Num() > 0 ? LumaSum / double(Luma.Num()) : 0.0;
 	const double NonBlackPercent = Luma.Num() > 0 ? 100.0 * double(NonBlackPixels) / double(Luma.Num()) : 0.0;
+	const double NearWhitePercent = Luma.Num() > 0 ? 100.0 * double(NearWhitePixels) / double(Luma.Num()) : 0.0;
+	const double NearBlackPercent = Luma.Num() > 0 ? 100.0 * double(NearBlackPixels) / double(Luma.Num()) : 0.0;
 	if (MaxLuma <= KINDA_SMALL_NUMBER)
 	{
 		UE_LOG(LogMHShadowBenchmark, Warning, TEXT("Benchmark capture is fully black: camera=%s route=%s file=%s"),
@@ -1729,8 +2000,39 @@ void FMHShadowBenchmarkRunner::RecordCapture(const FBenchmarkStep& Step, const F
 		MinLuma,
 		MaxLuma,
 		NonBlackPercent,
+		MeanLuma,
+		MinLuma,
+		MaxLuma,
+		NearWhitePercent,
+		NearBlackPercent,
 		Capture.Notes
 	});
+
+	if (IsHardShadowSanityCapture(Capture))
+	{
+		FString Details;
+		const FString Status = MakeHardShadowSanityStatus(Capture, MinLuma, MaxLuma, NearWhitePercent, NearBlackPercent, Details);
+		HardShadowSanityRows.Add({
+			Camera.Name,
+			Capture.Name,
+			Filename,
+			MeanLuma,
+			MinLuma,
+			MaxLuma,
+			NearWhitePercent,
+			NearBlackPercent,
+			Status,
+			Details
+		});
+		if (Status != TEXT("OK") && Status != TEXT("DefaultBiasStillHasShadow"))
+		{
+			UE_LOG(LogMHShadowBenchmark, Warning, TEXT("Hard-shadow sanity warning: camera=%s route=%s status=%s %s"),
+				*Camera.Name,
+				*Capture.Name,
+				*Status,
+				*Details);
+		}
+	}
 
 	const FString CaptureKey = MakeCaptureKey(Camera.Name, Capture.Name);
 	CaptureLumaByKey.Add(CaptureKey, Luma);
@@ -2015,10 +2317,10 @@ FMHShadowBenchmarkRunner::FDiffRow FMHShadowBenchmarkRunner::MakeDiffRow(const F
 void FMHShadowBenchmarkRunner::WriteOutputs() const
 {
 	TArray<FString> SummaryLines;
-	SummaryLines.Add(TEXT("Camera,Source,Filename,Width,Height,TimeSeconds,MeanLuma,MinLuma,MaxLuma,NonBlackPercent,Notes"));
+	SummaryLines.Add(TEXT("Camera,Source,Filename,Width,Height,TimeSeconds,MeanLuma,MinLuma,MaxLuma,NonBlackPercent,MeanVisibility,MinVisibility,MaxVisibility,NearWhitePercent,NearBlackPercent,Notes"));
 	for (const FCaptureRow& Row : CaptureRows)
 	{
-		SummaryLines.Add(FString::Printf(TEXT("%s,%s,%s,%d,%d,%.3f,%.8f,%.8f,%.8f,%.5f,%s"),
+		SummaryLines.Add(FString::Printf(TEXT("%s,%s,%s,%d,%d,%.3f,%.8f,%.8f,%.8f,%.5f,%.8f,%.8f,%.8f,%.5f,%.5f,%s"),
 			*CsvEscape(Row.Camera),
 			*CsvEscape(Row.Source),
 			*CsvEscape(Row.Filename),
@@ -2029,15 +2331,20 @@ void FMHShadowBenchmarkRunner::WriteOutputs() const
 			Row.MinLuma,
 			Row.MaxLuma,
 			Row.NonBlackPercent,
+			Row.MeanVisibility,
+			Row.MinVisibility,
+			Row.MaxVisibility,
+			Row.NearWhitePercent,
+			Row.NearBlackPercent,
 			*CsvEscape(Row.Notes)));
 	}
 	FFileHelper::SaveStringArrayToFile(SummaryLines, *FPaths::Combine(OutputDir, TEXT("BenchmarkSummary.csv")));
 
 	TArray<FString> RouteSummaryLines;
-	RouteSummaryLines.Add(TEXT("Source,SettleFrames,ResetCacheAtRouteStart,CompareToAtlas,StabilityRepeat,CVarSource,Debug,CachePagesX,CachePagesY,MaxUploads,LevelCount,Level0Distance,DistanceScale,FineLevelBias,FallbackMaxCoarserLevels,SingleLevelUseBaseData,CellDisableModulo,CellDisableRemainder,Commands,Notes"));
+	RouteSummaryLines.Add(TEXT("Source,SettleFrames,ResetCacheAtRouteStart,CompareToAtlas,StabilityRepeat,CVarSource,Debug,RestoredEnablePCF,RestoredDepthBiasScale,RestoredDepthBiasAdd,CachePagesX,CachePagesY,MaxUploads,LevelCount,Level0Distance,DistanceScale,FineLevelBias,FallbackMaxCoarserLevels,SingleLevelUseBaseData,CellDisableModulo,CellDisableRemainder,Commands,Notes"));
 	for (const FCaptureSpec& Capture : Captures)
 	{
-		RouteSummaryLines.Add(FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%s,%s"),
+		RouteSummaryLines.Add(FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%s,%s"),
 			*CsvEscape(Capture.Name),
 			Capture.SettleFrames,
 			Capture.bResetCacheAtRouteStart ? 1 : 0,
@@ -2045,6 +2352,9 @@ void FMHShadowBenchmarkRunner::WriteOutputs() const
 			Capture.bClipmapStabilityRepeat ? 1 : 0,
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Source"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Debug"))),
+			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.EnablePCF"))),
+			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"))),
+			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame"))),
@@ -2060,6 +2370,79 @@ void FMHShadowBenchmarkRunner::WriteOutputs() const
 			*CsvEscape(Capture.Notes)));
 	}
 	FFileHelper::SaveStringArrayToFile(RouteSummaryLines, *FPaths::Combine(OutputDir, TEXT("BenchmarkRouteSummary.csv")));
+
+	TArray<FString> SanityLines;
+	SanityLines.Add(TEXT("Camera,Source,Filename,MeanVisibility,MinVisibility,MaxVisibility,NearWhitePercent,NearBlackPercent,Status,Details"));
+	for (const FHardShadowSanityRow& Row : HardShadowSanityRows)
+	{
+		SanityLines.Add(FString::Printf(TEXT("%s,%s,%s,%.8f,%.8f,%.8f,%.5f,%.5f,%s,%s"),
+			*CsvEscape(Row.Camera),
+			*CsvEscape(Row.Source),
+			*CsvEscape(Row.Filename),
+			Row.MeanVisibility,
+			Row.MinVisibility,
+			Row.MaxVisibility,
+			Row.NearWhitePercent,
+			Row.NearBlackPercent,
+			*CsvEscape(Row.Status),
+			*CsvEscape(Row.Details)));
+	}
+	for (const FCameraSpec& Camera : Cameras)
+	{
+		const FString ZeroKey = MakeCaptureKey(Camera.Name, TEXT("Source6_ZeroRestoredBias_HardBaseline"));
+		const FString TunedKey = MakeCaptureKey(Camera.Name, TEXT("Source6_TunedBias_HardBaseline"));
+		const FString DefaultKey = MakeCaptureKey(Camera.Name, TEXT("Source6_DefaultRestoredBias_SuppressionCheck"));
+		const TArray<float>* ZeroLuma = CaptureLumaByKey.Find(ZeroKey);
+		const TArray<float>* TunedLuma = CaptureLumaByKey.Find(TunedKey);
+		const TArray<float>* DefaultLuma = CaptureLumaByKey.Find(DefaultKey);
+		const FIntPoint* ZeroSize = CaptureSizeByKey.Find(ZeroKey);
+		const FIntPoint* TunedSize = CaptureSizeByKey.Find(TunedKey);
+		const FIntPoint* DefaultSize = CaptureSizeByKey.Find(DefaultKey);
+		auto AppendBiasDiffWarning = [this, &SanityLines, &Camera](const FString& SourceName, const FString& BaselineName, const FIntPoint& Size, const TArray<float>& SourceLuma, const TArray<float>& BaselineLuma, const TCHAR* Status, const TCHAR* DetailPrefix)
+		{
+			const FDiffRow BiasDiff = MakeDiffRow(Camera.Name, SourceName, BaselineName, Size, SourceLuma, BaselineLuma);
+			if (BiasDiff.MeanAbs > 0.02 || BiasDiff.MismatchPercent > 5.0)
+			{
+				const FString Details = FString::Printf(TEXT("%s meanAbs=%.6f mismatch=%.5f maxAbs=%.6f"), DetailPrefix, BiasDiff.MeanAbs, BiasDiff.MismatchPercent, BiasDiff.MaxAbs);
+				SanityLines.Add(FString::Printf(TEXT("%s,%s,%s,%.8f,%.8f,%.8f,%.5f,%.5f,%s,%s"),
+					*CsvEscape(Camera.Name),
+					*CsvEscape(SourceName),
+					*CsvEscape(FString(TEXT("-"))),
+					0.0,
+					0.0,
+					0.0,
+					0.0,
+					0.0,
+					*CsvEscape(FString(Status)),
+					*CsvEscape(Details)));
+			}
+		};
+
+		if (DefaultLuma && TunedLuma && DefaultSize && TunedSize && *DefaultSize == *TunedSize && DefaultLuma->Num() == TunedLuma->Num())
+		{
+			AppendBiasDiffWarning(
+				TEXT("Source6_DefaultRestoredBias_SuppressionCheck"),
+				TEXT("Source6_TunedBias_HardBaseline"),
+				*DefaultSize,
+				*DefaultLuma,
+				*TunedLuma,
+				TEXT("BiasSuppressedShadow"),
+				TEXT("default-vs-tuned"));
+		}
+
+		if (ZeroLuma && TunedLuma && ZeroSize && TunedSize && *ZeroSize == *TunedSize && ZeroLuma->Num() == TunedLuma->Num())
+		{
+			AppendBiasDiffWarning(
+				TEXT("Source6_ZeroRestoredBias_HardBaseline"),
+				TEXT("Source6_TunedBias_HardBaseline"),
+				*ZeroSize,
+				*ZeroLuma,
+				*TunedLuma,
+				TEXT("ZeroBiasDiffersFromTuned"),
+				TEXT("zero-vs-tuned"));
+		}
+	}
+	FFileHelper::SaveStringArrayToFile(SanityLines, *FPaths::Combine(OutputDir, TEXT("HardShadowSanity.csv")));
 
 	TArray<FString> DiffLines;
 	DiffLines.Add(TEXT("Camera,Source,Baseline,Width,Height,MeanAbs,RMSE,MaxAbs,MismatchPixels,MismatchPercent"));
@@ -2257,6 +2640,8 @@ void FMHShadowBenchmarkRunner::WriteReadme() const
 	Readme += TEXT("- `PairwiseDiff.csv` compares selected cache/clipmap routes directly, especially Source=6 single-level degeneration against Source=5.\n");
 	Readme += TEXT("- `PairwiseSummary.csv` aggregates those pairwise comparisons so threshold checks do not require manual spreadsheet grouping.\n");
 	Readme += TEXT("- `BenchmarkRouteSummary.csv` records the CVar strategy behind each route, including cache size, clipmap level selection, and single-level base-data mode.\n");
+	Readme += TEXT("- `HardShadowSanity.csv` records visibility range and near-white/near-black ratios so an all-lit or all-shadowed capture cannot silently pass.\n");
+	Readme += TEXT("- RealClipmap hard-shadow correctness routes currently use `r.Shadow.MHStatic.Restored.DepthBiasAdd 0.01` as a manually tuned Stage 3 bias; Stage 5 should replace this with level-aware automatic bias.\n");
 	Readme += TEXT("- `BenchmarkCacheStats.csv` and `BenchmarkPerLevelStats.csv` attach renderer runtime cache stats to each screenshot.\n");
 	Readme += TEXT("- Runtime page/cache statistics are written by the renderer stats system under `Saved/MHShadow/RuntimeStats` when stats CSV is enabled.\n\n");
 	Readme += TEXT("## Useful Follow-up Commands\n\n");
