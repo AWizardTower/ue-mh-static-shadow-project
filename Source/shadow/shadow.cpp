@@ -54,6 +54,12 @@ public:
 			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartRealClipmapRegressionBenchmark),
 			ECVF_Default);
 
+		RunCacheStrategyRegressionCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Benchmark.RunCacheStrategyRegression"),
+			TEXT("Run the MH static shadow page-cache priority/prefetch strategy benchmark in PIE or Standalone."),
+			FConsoleCommandDelegate::CreateRaw(&BenchmarkRunner, &FMHShadowBenchmarkRunner::StartCacheStrategyRegressionBenchmark),
+			ECVF_Default);
+
 		StopBenchmarkCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("MHShadow.Benchmark.Stop"),
 			TEXT("Stop the active MH static shadow benchmark."),
@@ -100,6 +106,11 @@ public:
 			IConsoleManager::Get().UnregisterConsoleObject(RunRealClipmapRegressionCommand);
 			RunRealClipmapRegressionCommand = nullptr;
 		}
+		if (RunCacheStrategyRegressionCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(RunCacheStrategyRegressionCommand);
+			RunCacheStrategyRegressionCommand = nullptr;
+		}
 		if (StopBenchmarkCommand)
 		{
 			IConsoleManager::Get().UnregisterConsoleObject(StopBenchmarkCommand);
@@ -118,6 +129,7 @@ private:
 	IConsoleObject* RunClipmapDegenerationCommand = nullptr;
 	IConsoleObject* RunCellProviderRegressionCommand = nullptr;
 	IConsoleObject* RunRealClipmapRegressionCommand = nullptr;
+	IConsoleObject* RunCacheStrategyRegressionCommand = nullptr;
 	IConsoleObject* StopBenchmarkCommand = nullptr;
 };
 

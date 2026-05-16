@@ -21,6 +21,7 @@ public:
 	void StartClipmapDegenerationBenchmark();
 	void StartCellProviderRegressionBenchmark();
 	void StartRealClipmapRegressionBenchmark();
+	void StartCacheStrategyRegressionBenchmark();
 	void CaptureCurrent();
 	void StopBenchmark();
 
@@ -32,7 +33,8 @@ private:
 		ClipmapRegression,
 		ClipmapDegeneration,
 		CellProviderRegression,
-		RealClipmapRegression
+		RealClipmapRegression,
+		CacheStrategyRegression
 	};
 
 	struct FCameraSpec
@@ -141,6 +143,11 @@ private:
 		uint64 LargestProviderCellBytes = 0;
 		int32 ProviderLoadedCells = 0;
 		int32 ProviderUnavailablePages = 0;
+		uint64 RequestedPixels = 0;
+		uint64 ResidentRequestedPixels = 0;
+		uint64 MissRequestedPixels = 0;
+		double PixelWeightedHitRate = 0.0;
+		double PixelWeightedMissRate = 0.0;
 	};
 
 	struct FRuntimeLevelRow
@@ -157,6 +164,9 @@ private:
 		int32 ResidentTotalPages = 0;
 		int32 Uploads = 0;
 		int32 Evictions = 0;
+		uint64 RequestedPixels = 0;
+		uint64 ResidentRequestedPixels = 0;
+		uint64 MissRequestedPixels = 0;
 	};
 
 	struct FCaptureStatsRow
@@ -193,6 +203,7 @@ private:
 	void BuildClipmapDegenerationPlan();
 	void BuildCellProviderRegressionPlan();
 	void BuildRealClipmapRegressionPlan();
+	void BuildCacheStrategyRegressionPlan();
 	void NormalizeHardShadowCaptureCommands();
 	bool IsHardShadowSanityCapture(const FCaptureSpec& Capture) const;
 	FString MakeHardShadowSanityStatus(const FCaptureSpec& Capture, double MinVisibility, double MaxVisibility, double NearWhitePercent, double NearBlackPercent, FString& OutDetails) const;
