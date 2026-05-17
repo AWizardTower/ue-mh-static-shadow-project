@@ -133,6 +133,18 @@ public:
 			TEXT("Apply the experimental Source=6 quality preset: 16x16 cache, receiver-plane bias, stable 3x3 PCF."),
 			FConsoleCommandDelegate::CreateRaw(this, &FShadowModule::ApplyQualityClipmap16Preset),
 			ECVF_Default);
+
+		AutoBiasClipmap16PresetCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Preset.AutoBiasClipmap16"),
+			TEXT("Apply the Source=6 automatic UE-style receiver-plane bias preset without PCF."),
+			FConsoleCommandDelegate::CreateRaw(this, &FShadowModule::ApplyAutoBiasClipmap16Preset),
+			ECVF_Default);
+
+		PCFClipmap16PresetCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("MHShadow.Preset.PCFClipmap16"),
+			TEXT("Apply the recommended Source=6 conservative PCF preset: 16x16 cache, fixed tuned bias, same-level 3x3 PCF."),
+			FConsoleCommandDelegate::CreateRaw(this, &FShadowModule::ApplyPCFClipmap16Preset),
+			ECVF_Default);
 	}
 
 	virtual void ShutdownModule() override
@@ -204,6 +216,16 @@ public:
 			IConsoleManager::Get().UnregisterConsoleObject(QualityClipmap16PresetCommand);
 			QualityClipmap16PresetCommand = nullptr;
 		}
+		if (AutoBiasClipmap16PresetCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(AutoBiasClipmap16PresetCommand);
+			AutoBiasClipmap16PresetCommand = nullptr;
+		}
+		if (PCFClipmap16PresetCommand)
+		{
+			IConsoleManager::Get().UnregisterConsoleObject(PCFClipmap16PresetCommand);
+			PCFClipmap16PresetCommand = nullptr;
+		}
 
 		FDefaultGameModuleImpl::ShutdownModule();
 	}
@@ -219,6 +241,7 @@ private:
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 0);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 0);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"), 1);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
 		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.HardClipmap16."));
 	}
@@ -233,6 +256,7 @@ private:
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 0);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 0);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"), 1);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
 		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.LowMemoryHardClipmap8."));
 	}
@@ -247,14 +271,67 @@ private:
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 1);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 1);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 2);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"), 1);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFKernel"), 3);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels"), 1.0f);
-		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"), 24.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"), 4.0f);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale"), 1.0f);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp"), 0.01f);
-		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"), 0.5f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"), 0);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.CoarseLevelBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), 0.01f);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
 		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.QualityClipmap16."));
+	}
+
+	void ApplyAutoBiasClipmap16Preset()
+	{
+		ApplyCommonSource6Preset();
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchRadius"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchBudget"), 32);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 0);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 2);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"), 1);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"), 4.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale"), 1.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp"), 0.01f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"), 0);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.CoarseLevelBiasScale"), 0.0f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
+		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.AutoBiasClipmap16."));
+	}
+
+	void ApplyPCFClipmap16Preset()
+	{
+		ApplyCommonSource6Preset();
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"), 16);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchRadius"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.PrefetchBudget"), 32);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.EnablePCF"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.FilterMode"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.BiasMode"), 2);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"), 1);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.PCFKernel"), 3);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels"), 1.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"), 4.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale"), 1.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp"), 0.01f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"), 0);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.CoarseLevelBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), 0.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), 0.01f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
+		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.PCFClipmap16."));
 	}
 
 	FMHShadowBenchmarkRunner BenchmarkRunner;
@@ -271,6 +348,8 @@ private:
 	IConsoleObject* HardClipmap16PresetCommand = nullptr;
 	IConsoleObject* LowMemoryHardClipmap8PresetCommand = nullptr;
 	IConsoleObject* QualityClipmap16PresetCommand = nullptr;
+	IConsoleObject* AutoBiasClipmap16PresetCommand = nullptr;
+	IConsoleObject* PCFClipmap16PresetCommand = nullptr;
 };
 
 IMPLEMENT_PRIMARY_GAME_MODULE(FShadowModule, shadow, "shadow");

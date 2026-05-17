@@ -1470,7 +1470,7 @@ void FMHShadowBenchmarkRunner::BuildQualityRegressionPlan()
 		TEXT("r.Shadow.MHStatic.Clipmap.FallbackMaxCoarserLevels 3")
 	};
 
-	auto MakeQualityRoute = [&StableCaptureCommands](const TCHAR* Name, int32 BiasMode, int32 FilterMode, int32 Kernel, float RadiusTexels, const TCHAR* BiasAdd, int32 SettleFrames, const TCHAR* Notes)
+	auto MakeQualityRoute = [&StableCaptureCommands](const TCHAR* Name, int32 BiasMode, int32 FilterMode, int32 Kernel, int32 SamplePolicy, float RadiusTexels, const TCHAR* BiasAdd, int32 SettleFrames, const TCHAR* Notes)
 	{
 		FCaptureSpec Capture;
 		Capture.Name = Name;
@@ -1480,12 +1480,14 @@ void FMHShadowBenchmarkRunner::BuildQualityRegressionPlan()
 			TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale 0"),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd %s"), BiasAdd),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.BiasMode %d"), BiasMode),
-			TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits 24"),
+			TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits 4"),
 			TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale 1"),
 			TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp 0.01"),
-			TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale 0.5"),
+			TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope 0"),
+			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale %.3f"), FilterMode != 0 ? 0.5f : 0.0f),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.FilterMode %d"), FilterMode),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.PCFKernel %d"), Kernel),
+			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy %d"), SamplePolicy),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels %.3f"), RadiusTexels)
 		});
 		if (FilterMode != 0)
@@ -1500,28 +1502,31 @@ void FMHShadowBenchmarkRunner::BuildQualityRegressionPlan()
 		return Capture;
 	};
 
-	FCaptureSpec Hard = MakeQualityRoute(TEXT("Hard_Source6_TunedBias"), 0, 0, 3, 1.0f, GRealClipmapTunedRestoredDepthBiasAdd, 20, TEXT("Manual fixed 0.01 bias hard-shadow baseline for Stage 5 quality comparison."));
+	FCaptureSpec Hard = MakeQualityRoute(TEXT("Hard_FixedBias_0p01"), 0, 0, 3, 1, 1.0f, GRealClipmapTunedRestoredDepthBiasAdd, 20, TEXT("Manual fixed 0.01 bias hard-shadow baseline for Stage 5 quality comparison."));
 	Hard.bAtlasBaseline = true;
 	Captures.Add(Hard);
-	Captures.Add(MakeQualityRoute(TEXT("Bias_LevelAware_Hard"), 1, 0, 3, 1.0f, TEXT("0"), 20, TEXT("Automatic level-aware normalized bias, hard compare.")));
-	Captures.Add(MakeQualityRoute(TEXT("Bias_ReceiverPlane_Hard"), 2, 0, 3, 1.0f, TEXT("0"), 20, TEXT("Level-aware plus receiver-plane slope bias, hard compare.")));
-	Captures.Add(MakeQualityRoute(TEXT("PCF3_LevelAware"), 1, 1, 3, 1.0f, TEXT("0"), 24, TEXT("Stable 3x3 page-table-aware PCF with level-aware bias.")));
-	Captures.Add(MakeQualityRoute(TEXT("PCF3_ReceiverPlane"), 2, 1, 3, 1.0f, TEXT("0"), 24, TEXT("Stable 3x3 page-table-aware PCF with receiver-plane bias.")));
+	Captures.Add(MakeQualityRoute(TEXT("Hard_LevelAware_WorldBias"), 1, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("Automatic per-level world-space bias, hard compare.")));
+	Captures.Add(MakeQualityRoute(TEXT("Hard_UEReceiverPlane_GBuffer"), 2, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("UE-style receiver-plane slope bias using GBuffer normal, hard compare.")));
+	FCaptureSpec ScreenFallback = MakeQualityRoute(TEXT("Hard_UEReceiverPlane_ScreenFallback"), 2, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("Receiver-plane route with screen-depth fallback diagnostics; use only if GBuffer normal is unavailable."));
+	UpsertCommand(ScreenFallback.Commands, TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"), TEXT("1"));
+	Captures.Add(ScreenFallback);
+	Captures.Add(MakeQualityRoute(TEXT("PCF3_FixedBias_SameResolvedLevel"), 0, 1, 3, 1, 1.0f, GRealClipmapTunedRestoredDepthBiasAdd, 24, TEXT("Conservative Source=6 3x3 PCF: fixed tuned bias and center-resolved clipmap level.")));
+	FCaptureSpec ReceiverPCF = MakeQualityRoute(TEXT("PCF3_UEReceiverPlane_SameResolvedLevel"), 2, 1, 3, 1, 1.0f, GRealClipmapTunedRestoredDepthBiasAdd, 24, TEXT("Recommended Stage 5.2 route: fixed 0.01 bias floor plus UE-style receiver-plane same-level 3x3 PCF."));
+	Captures.Add(ReceiverPCF);
 
-	FCaptureSpec PCF3Repeat = MakeQualityRoute(TEXT("PCF3_ReceiverPlane_Repeat"), 2, 1, 3, 1.0f, TEXT("0"), 24, TEXT("Repeat capture for PCF3 receiver-plane temporal stability."));
+	FCaptureSpec PCF3Repeat = ReceiverPCF;
+	PCF3Repeat.Name = TEXT("PCF3_UEReceiverPlane_SameResolvedLevel_Repeat");
+	PCF3Repeat.Notes = TEXT("Repeat capture for UE-style receiver-plane PCF temporal stability.");
 	PCF3Repeat.bClipmapStabilityRepeat = true;
-	PCF3Repeat.StabilityBaselineName = TEXT("PCF3_ReceiverPlane");
+	PCF3Repeat.StabilityBaselineName = TEXT("PCF3_UEReceiverPlane_SameResolvedLevel");
 	Captures.Add(PCF3Repeat);
 
-	Captures.Add(MakeQualityRoute(TEXT("PCF5_ReceiverPlane"), 2, 1, 5, 2.0f, TEXT("0"), 28, TEXT("Stable 5x5 page-table-aware PCF with receiver-plane bias.")));
-
-	PairwiseSpecs.Add({ TEXT("Bias_LevelAware_Hard"), TEXT("Hard_Source6_TunedBias") });
-	PairwiseSpecs.Add({ TEXT("Bias_ReceiverPlane_Hard"), TEXT("Hard_Source6_TunedBias") });
-	PairwiseSpecs.Add({ TEXT("PCF3_LevelAware"), TEXT("Hard_Source6_TunedBias") });
-	PairwiseSpecs.Add({ TEXT("PCF3_ReceiverPlane"), TEXT("Hard_Source6_TunedBias") });
-	PairwiseSpecs.Add({ TEXT("PCF5_ReceiverPlane"), TEXT("Hard_Source6_TunedBias") });
-	PairwiseSpecs.Add({ TEXT("PCF3_ReceiverPlane"), TEXT("PCF3_LevelAware") });
-	PairwiseSpecs.Add({ TEXT("PCF5_ReceiverPlane"), TEXT("PCF3_ReceiverPlane") });
+	PairwiseSpecs.Add({ TEXT("Hard_LevelAware_WorldBias"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("Hard_UEReceiverPlane_GBuffer"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("Hard_UEReceiverPlane_ScreenFallback"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("PCF3_FixedBias_SameResolvedLevel"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("PCF3_UEReceiverPlane_SameResolvedLevel"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("PCF3_UEReceiverPlane_SameResolvedLevel"), TEXT("PCF3_FixedBias_SameResolvedLevel") });
 
 	for (int32 CaptureIndex = 0; CaptureIndex < Captures.Num(); ++CaptureIndex)
 	{
@@ -2600,10 +2605,10 @@ void FMHShadowBenchmarkRunner::WriteOutputs() const
 	FFileHelper::SaveStringArrayToFile(SummaryLines, *FPaths::Combine(OutputDir, TEXT("BenchmarkSummary.csv")));
 
 	TArray<FString> RouteSummaryLines;
-	RouteSummaryLines.Add(TEXT("Source,SettleFrames,ResetCacheAtRouteStart,CompareToAtlas,StabilityRepeat,CVarSource,Debug,RestoredEnablePCF,RestoredDepthBiasScale,RestoredDepthBiasAdd,RestoredBiasMode,RestoredBiasWorldUnits,RestoredSlopeBiasScale,RestoredSlopeBiasClamp,RestoredFilterBiasScale,RestoredFilterMode,RestoredPCFKernel,RestoredPCFRadiusTexels,CachePagesX,CachePagesY,MaxUploads,CachePriorityMode,CacheLevelPriorityScale,CacheResidencyBoost,CacheEvictRequested,CacheEvictHysteresis,CachePrefetchRadius,CachePrefetchBudget,LevelCount,Level0Distance,DistanceScale,FineLevelBias,FallbackMaxCoarserLevels,SingleLevelUseBaseData,CellDisableModulo,CellDisableRemainder,Commands,Notes"));
+	RouteSummaryLines.Add(TEXT("Source,SettleFrames,ResetCacheAtRouteStart,CompareToAtlas,StabilityRepeat,CVarSource,Debug,RestoredEnablePCF,RestoredDepthBiasScale,RestoredDepthBiasAdd,RestoredBiasMode,RestoredBiasWorldUnits,RestoredSlopeBiasScale,RestoredSlopeBiasClamp,RestoredForceScreenSlope,RestoredFilterBiasScale,RestoredFilterMode,RestoredPCFKernel,RestoredPCFSamplePolicy,RestoredPCFRadiusTexels,CachePagesX,CachePagesY,MaxUploads,CachePriorityMode,CacheLevelPriorityScale,CacheResidencyBoost,CacheEvictRequested,CacheEvictHysteresis,CachePrefetchRadius,CachePrefetchBudget,LevelCount,Level0Distance,DistanceScale,FineLevelBias,FallbackMaxCoarserLevels,SingleLevelUseBaseData,CellDisableModulo,CellDisableRemainder,Commands,Notes"));
 	for (const FCaptureSpec& Capture : Captures)
 	{
-		RouteSummaryLines.Add(FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%s,%s"),
+		RouteSummaryLines.Add(FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%s,%s"),
 			*CsvEscape(Capture.Name),
 			Capture.SettleFrames,
 			Capture.bResetCacheAtRouteStart ? 1 : 0,
@@ -2618,9 +2623,11 @@ void FMHShadowBenchmarkRunner::WriteOutputs() const
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp"))),
+			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.FilterMode"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFKernel"))),
+			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"))),
 			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"))),
