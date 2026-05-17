@@ -23,6 +23,7 @@ public:
 	void StartRealClipmapRegressionBenchmark();
 	void StartCacheStrategyRegressionBenchmark();
 	void StartQualityRegressionBenchmark();
+	void StartSoftShadowRegressionBenchmark();
 	void CaptureCurrent();
 	void StopBenchmark();
 
@@ -36,7 +37,8 @@ private:
 		CellProviderRegression,
 		RealClipmapRegression,
 		CacheStrategyRegression,
-		QualityRegression
+		QualityRegression,
+		SoftShadowRegression
 	};
 
 	struct FCameraSpec
@@ -207,6 +209,7 @@ private:
 	void BuildRealClipmapRegressionPlan();
 	void BuildCacheStrategyRegressionPlan();
 	void BuildQualityRegressionPlan();
+	void BuildSoftShadowRegressionPlan();
 	void NormalizeHardShadowCaptureCommands();
 	bool IsHardShadowSanityCapture(const FCaptureSpec& Capture) const;
 	FString MakeHardShadowSanityStatus(const FCaptureSpec& Capture, double MinVisibility, double MaxVisibility, double NearWhitePercent, double NearBlackPercent, FString& OutDetails) const;
