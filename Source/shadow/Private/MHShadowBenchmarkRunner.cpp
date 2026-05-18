@@ -1493,6 +1493,7 @@ void FMHShadowBenchmarkRunner::BuildQualityRegressionPlan()
 			TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale 1"),
 			TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp 0.01"),
 			TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope 0"),
+			TEXT("r.Shadow.MHStatic.Restored.UEBiasDistribution 1"),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale %.3f"), FilterMode != 0 ? 0.5f : 0.0f),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.FilterMode %d"), FilterMode),
 			FString::Printf(TEXT("r.Shadow.MHStatic.Restored.PCFKernel %d"), Kernel),
@@ -1515,11 +1516,13 @@ void FMHShadowBenchmarkRunner::BuildQualityRegressionPlan()
 	Hard.bAtlasBaseline = true;
 	Captures.Add(Hard);
 	Captures.Add(MakeQualityRoute(TEXT("Hard_LevelAware_WorldBias"), 1, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("Automatic per-level world-space bias, hard compare.")));
-	Captures.Add(MakeQualityRoute(TEXT("Hard_UEReceiverPlane_GBuffer"), 2, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("UE-style receiver-plane slope bias using GBuffer normal, hard compare.")));
+	Captures.Add(MakeQualityRoute(TEXT("Hard_OldReceiverPlane"), 2, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("Previous receiver-plane slope bias using GBuffer normal, hard compare.")));
+	Captures.Add(MakeQualityRoute(TEXT("Hard_UECSMCompatible"), 3, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("UE CSM-compatible bias using Directional Light shadow bias and CSM bias CVars.")));
 	FCaptureSpec ScreenFallback = MakeQualityRoute(TEXT("Hard_UEReceiverPlane_ScreenFallback"), 2, 0, 3, 1, 1.0f, TEXT("0"), 20, TEXT("Receiver-plane route with screen-depth fallback diagnostics; use only if GBuffer normal is unavailable."));
 	UpsertCommand(ScreenFallback.Commands, TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"), TEXT("1"));
 	Captures.Add(ScreenFallback);
 	Captures.Add(MakeQualityRoute(TEXT("PCF3_FixedBias_SameResolvedLevel"), 0, 1, 3, 1, 1.0f, GRealClipmapTunedRestoredDepthBiasAdd, 24, TEXT("Conservative Source=6 3x3 PCF: fixed tuned bias and center-resolved clipmap level.")));
+	Captures.Add(MakeQualityRoute(TEXT("PCF3_UECSMCompatible"), 3, 1, 3, 1, 1.0f, TEXT("0"), 24, TEXT("UE CSM-compatible bias plus same-resolved-level 3x3 PCF.")));
 	FCaptureSpec ReceiverPCF = MakeQualityRoute(TEXT("PCF3_UEReceiverPlane_SameResolvedLevel"), 2, 1, 3, 1, 1.0f, GRealClipmapTunedRestoredDepthBiasAdd, 24, TEXT("Recommended Stage 5.2 route: fixed 0.01 bias floor plus UE-style receiver-plane same-level 3x3 PCF."));
 	Captures.Add(ReceiverPCF);
 
@@ -1531,9 +1534,12 @@ void FMHShadowBenchmarkRunner::BuildQualityRegressionPlan()
 	Captures.Add(PCF3Repeat);
 
 	PairwiseSpecs.Add({ TEXT("Hard_LevelAware_WorldBias"), TEXT("Hard_FixedBias_0p01") });
-	PairwiseSpecs.Add({ TEXT("Hard_UEReceiverPlane_GBuffer"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("Hard_OldReceiverPlane"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("Hard_UECSMCompatible"), TEXT("Hard_FixedBias_0p01") });
 	PairwiseSpecs.Add({ TEXT("Hard_UEReceiverPlane_ScreenFallback"), TEXT("Hard_FixedBias_0p01") });
 	PairwiseSpecs.Add({ TEXT("PCF3_FixedBias_SameResolvedLevel"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("PCF3_UECSMCompatible"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("PCF3_UECSMCompatible"), TEXT("PCF3_FixedBias_SameResolvedLevel") });
 	PairwiseSpecs.Add({ TEXT("PCF3_UEReceiverPlane_SameResolvedLevel"), TEXT("Hard_FixedBias_0p01") });
 	PairwiseSpecs.Add({ TEXT("PCF3_UEReceiverPlane_SameResolvedLevel"), TEXT("PCF3_FixedBias_SameResolvedLevel") });
 

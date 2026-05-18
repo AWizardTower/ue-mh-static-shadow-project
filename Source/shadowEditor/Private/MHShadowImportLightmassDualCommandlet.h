@@ -6,6 +6,8 @@
 #include "Commandlets/Commandlet.h"
 #include "MHShadowImportLightmassDualCommandlet.generated.h"
 
+int32 RunMHShadowImportLightmassDualCommandlet(const FString& Params);
+
 UCLASS()
 class UMHShadowImportLightmassDualCommandlet : public UCommandlet
 {

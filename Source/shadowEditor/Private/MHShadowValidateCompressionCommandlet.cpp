@@ -234,14 +234,21 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 		&& Asset->TileCount.X > 0
 		&& Asset->TileCount.Y > 0
 		&& Asset->Tiles.Num() == Asset->TileCount.X * Asset->TileCount.Y;
-	if (Asset->RawIntervals.Num() != ExpectedTexelCount || Asset->Resolution.X <= 0 || Asset->Resolution.Y <= 0 || (!bHasTiledData && Asset->Resolution.X != Asset->Resolution.Y))
+	const bool bHasBaseRaw = Asset->RawIntervals.Num() == ExpectedTexelCount;
+	const bool bHasClipmapData = Asset->ClipmapLevels.Num() > 0
+		&& Asset->ClipmapTiles.Num() > 0
+		&& Asset->ClipmapNodes.Num() > 0;
+	if (Asset->Resolution.X <= 0 || Asset->Resolution.Y <= 0 || (!bHasBaseRaw && !bHasClipmapData) || (!bHasTiledData && Asset->Resolution.X != Asset->Resolution.Y && !bHasClipmapData))
 	{
-		UE_LOG(LogTemp, Error, TEXT("Invalid MH shadow asset for compression validation: %s resolution=%dx%d rawIntervals=%d expected=%d"),
+		UE_LOG(LogTemp, Error, TEXT("Invalid MH shadow asset for compression validation: %s resolution=%dx%d rawIntervals=%d expected=%d clipmapLevels=%d clipmapTiles=%d clipmapNodes=%d"),
 			*AssetPath,
 			Asset->Resolution.X,
 			Asset->Resolution.Y,
 			Asset->RawIntervals.Num(),
-			ExpectedTexelCount);
+			ExpectedTexelCount,
+			Asset->ClipmapLevels.Num(),
+			Asset->ClipmapTiles.Num(),
+			Asset->ClipmapNodes.Num());
 		return 1;
 	}
 
@@ -261,74 +268,77 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 		TileStats.SetNum(Asset->Tiles.Num());
 	}
 
-	for (int32 Y = 0; Y < Asset->Resolution.Y; ++Y)
+	if (bHasBaseRaw)
 	{
-		for (int32 X = 0; X < Asset->Resolution.X; ++X)
+		for (int32 Y = 0; Y < Asset->Resolution.Y; ++Y)
 		{
-			const int32 TexelIndex = Y * Asset->Resolution.X + X;
-			const FMHShadowDepthInterval& RawInterval = Asset->RawIntervals[TexelIndex];
-			const float ExpectedMin = RawInterval.bValid ? RawInterval.MinDepth : 1.0f;
-			const float ExpectedMax = RawInterval.bValid ? RawInterval.MaxDepth : 1.0f;
-
-			ValidRawTexels += RawInterval.bValid ? 1 : 0;
-			EmptyRawTexels += RawInterval.bValid ? 0 : 1;
-			FTileValidationStats* CurrentTileStats = nullptr;
-			if (bHasTiledData)
+			for (int32 X = 0; X < Asset->Resolution.X; ++X)
 			{
-				const int32 TileX = X / Asset->TileSize;
-				const int32 TileY = Y / Asset->TileSize;
-				const int32 TileIndex = TileY * Asset->TileCount.X + TileX;
-				CurrentTileStats = TileStats.IsValidIndex(TileIndex) ? &TileStats[TileIndex] : nullptr;
+				const int32 TexelIndex = Y * Asset->Resolution.X + X;
+				const FMHShadowDepthInterval& RawInterval = Asset->RawIntervals[TexelIndex];
+				const float ExpectedMin = RawInterval.bValid ? RawInterval.MinDepth : 1.0f;
+				const float ExpectedMax = RawInterval.bValid ? RawInterval.MaxDepth : 1.0f;
+
+				ValidRawTexels += RawInterval.bValid ? 1 : 0;
+				EmptyRawTexels += RawInterval.bValid ? 0 : 1;
+				FTileValidationStats* CurrentTileStats = nullptr;
+				if (bHasTiledData)
+				{
+					const int32 TileX = X / Asset->TileSize;
+					const int32 TileY = Y / Asset->TileSize;
+					const int32 TileIndex = TileY * Asset->TileCount.X + TileX;
+					CurrentTileStats = TileStats.IsValidIndex(TileIndex) ? &TileStats[TileIndex] : nullptr;
+					if (CurrentTileStats)
+					{
+						++CurrentTileStats->RawTexels;
+						CurrentTileStats->ValidTexels += RawInterval.bValid ? 1 : 0;
+						CurrentTileStats->EmptyTexels += RawInterval.bValid ? 0 : 1;
+					}
+				}
+
+				float RepresentativeDepth = 1.0f;
+				if (!SampleRepresentativeDepth(*Asset, X, Y, RepresentativeDepth))
+				{
+					++MissingTexels;
+					if (CurrentTileStats)
+					{
+						++CurrentTileStats->MissingTexels;
+					}
+					if (ErrorRows.Num() < 64)
+					{
+						ErrorRows.Add(FString::Printf(TEXT("Missing,%d,%d,%d,%.9f,%.9f,NaN"), X, Y, TexelIndex, ExpectedMin, ExpectedMax));
+					}
+					continue;
+				}
+
+				const bool bInsideInterval = RepresentativeDepth >= ExpectedMin - Tolerance && RepresentativeDepth <= ExpectedMax + Tolerance;
+				if (!bInsideInterval)
+				{
+					++MismatchTexels;
+					if (CurrentTileStats)
+					{
+						++CurrentTileStats->MismatchTexels;
+					}
+					if (ErrorRows.Num() < 64)
+					{
+						ErrorRows.Add(FString::Printf(TEXT("Mismatch,%d,%d,%d,%.9f,%.9f,%.9f"), X, Y, TexelIndex, ExpectedMin, ExpectedMax, RepresentativeDepth));
+					}
+					continue;
+				}
+
+				++RepresentedTexels;
 				if (CurrentTileStats)
 				{
-					++CurrentTileStats->RawTexels;
-					CurrentTileStats->ValidTexels += RawInterval.bValid ? 1 : 0;
-					CurrentTileStats->EmptyTexels += RawInterval.bValid ? 0 : 1;
+					++CurrentTileStats->RepresentedTexels;
 				}
-			}
-
-			float RepresentativeDepth = 1.0f;
-			if (!SampleRepresentativeDepth(*Asset, X, Y, RepresentativeDepth))
-			{
-				++MissingTexels;
-				if (CurrentTileStats)
+				if (RawInterval.bValid)
 				{
-					++CurrentTileStats->MissingTexels;
+					const float IntervalWidth = FMath::Max(0.0f, ExpectedMax - ExpectedMin);
+					const float RepresentativeShrink = FMath::Max(RepresentativeDepth - ExpectedMin, ExpectedMax - RepresentativeDepth);
+					const float Shrink = FMath::Max(0.0f, IntervalWidth - RepresentativeShrink);
+					ShrinkSum += Shrink;
+					MaxShrink = FMath::Max(MaxShrink, Shrink);
 				}
-				if (ErrorRows.Num() < 64)
-				{
-					ErrorRows.Add(FString::Printf(TEXT("Missing,%d,%d,%d,%.9f,%.9f,NaN"), X, Y, TexelIndex, ExpectedMin, ExpectedMax));
-				}
-				continue;
-			}
-
-			const bool bInsideInterval = RepresentativeDepth >= ExpectedMin - Tolerance && RepresentativeDepth <= ExpectedMax + Tolerance;
-			if (!bInsideInterval)
-			{
-				++MismatchTexels;
-				if (CurrentTileStats)
-				{
-					++CurrentTileStats->MismatchTexels;
-				}
-				if (ErrorRows.Num() < 64)
-				{
-					ErrorRows.Add(FString::Printf(TEXT("Mismatch,%d,%d,%d,%.9f,%.9f,%.9f"), X, Y, TexelIndex, ExpectedMin, ExpectedMax, RepresentativeDepth));
-				}
-				continue;
-			}
-
-			++RepresentedTexels;
-			if (CurrentTileStats)
-			{
-				++CurrentTileStats->RepresentedTexels;
-			}
-			if (RawInterval.bValid)
-			{
-				const float IntervalWidth = FMath::Max(0.0f, ExpectedMax - ExpectedMin);
-				const float RepresentativeShrink = FMath::Max(RepresentativeDepth - ExpectedMin, ExpectedMax - RepresentativeDepth);
-				const float Shrink = FMath::Max(0.0f, IntervalWidth - RepresentativeShrink);
-				ShrinkSum += Shrink;
-				MaxShrink = FMath::Max(MaxShrink, Shrink);
 			}
 		}
 	}
@@ -339,23 +349,26 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 	int32 ClipmapMissingTexels = 0;
 	int32 ClipmapMismatchTexels = 0;
 	FString ClipmapCsv;
-	ClipmapCsv += TEXT("LevelIndex,ResolutionX,ResolutionY,TileCountX,TileCountY,RawTexels,RepresentedTexels,MissingTexels,MismatchTexels\n");
+	ClipmapCsv += TEXT("LevelIndex,ResolutionX,ResolutionY,TileCountX,TileCountY,RawStored,RawTexels,RepresentedTexels,MissingTexels,MismatchTexels\n");
 	for (const FMHShadowClipmapLevel& Level : Asset->ClipmapLevels)
 	{
-		const bool bLevelValid =
+		const bool bLevelStructureValid =
 			Level.Resolution.X > 0
 			&& Level.Resolution.Y > 0
 			&& Level.TileSize > 0
 			&& Level.TileCount.X > 0
 			&& Level.TileCount.Y > 0
-			&& Level.RawIntervalOffset >= 0
-			&& Level.RawIntervalOffset + Level.RawIntervalCount <= Asset->ClipmapRawIntervals.Num()
 			&& Level.TileOffset >= 0
 			&& Level.TileOffset + Level.TileDataCount <= Asset->ClipmapTiles.Num();
-		if (!bLevelValid)
+		const int32 ExpectedLevelTexels = Level.Resolution.X * Level.Resolution.Y;
+		const bool bHasStoredRaw =
+			Level.RawIntervalCount == ExpectedLevelTexels
+			&& Level.RawIntervalOffset >= 0
+			&& Level.RawIntervalOffset + Level.RawIntervalCount <= Asset->ClipmapRawIntervals.Num();
+		if (!bLevelStructureValid)
 		{
 			++ClipmapMissingTexels;
-			ClipmapCsv += FString::Printf(TEXT("%d,%d,%d,%d,%d,0,0,1,0\n"),
+			ClipmapCsv += FString::Printf(TEXT("%d,%d,%d,%d,%d,0,0,0,1,0\n"),
 				Level.LevelIndex,
 				Level.Resolution.X,
 				Level.Resolution.Y,
@@ -365,6 +378,18 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 		}
 
 		++ClipmapLevelCount;
+		if (!bHasStoredRaw)
+		{
+			ClipmapCsv += FString::Printf(TEXT("%d,%d,%d,%d,%d,0,%d,0,0,0\n"),
+				Level.LevelIndex,
+				Level.Resolution.X,
+				Level.Resolution.Y,
+				Level.TileCount.X,
+				Level.TileCount.Y,
+				ExpectedLevelTexels);
+			continue;
+		}
+
 		int32 LevelRawTexels = 0;
 		int32 LevelRepresentedTexels = 0;
 		int32 LevelMissingTexels = 0;
@@ -413,7 +438,7 @@ int32 UMHShadowValidateCompressionCommandlet::Main(const FString& Params)
 		ClipmapRepresentedTexels += LevelRepresentedTexels;
 		ClipmapMissingTexels += LevelMissingTexels;
 		ClipmapMismatchTexels += LevelMismatchTexels;
-		ClipmapCsv += FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d\n"),
+		ClipmapCsv += FString::Printf(TEXT("%d,%d,%d,%d,%d,1,%d,%d,%d,%d\n"),
 			Level.LevelIndex,
 			Level.Resolution.X,
 			Level.Resolution.Y,

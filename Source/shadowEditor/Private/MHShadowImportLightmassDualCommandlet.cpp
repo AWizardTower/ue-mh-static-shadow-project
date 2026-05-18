@@ -680,7 +680,8 @@ static bool AppendCompressedClipmapLevel(
 	int32 TileSize,
 	FVector2D TexelWorldSize,
 	double& InOutCompressionSeconds,
-	int64& InOutCompressedBytes)
+	int64& InOutCompressedBytes,
+	bool bStoreRawIntervals = true)
 {
 	if (LevelResolution.X <= 0 || LevelResolution.Y <= 0 || TileSize <= 0)
 	{
@@ -714,8 +715,8 @@ static bool AppendCompressedClipmapLevel(
 	Level.Resolution = LevelResolution;
 	Level.TileSize = TileSize;
 	Level.TileCount = FIntPoint(LevelResolution.X / TileSize, LevelResolution.Y / TileSize);
-	Level.RawIntervalOffset = Asset.ClipmapRawIntervals.Num();
-	Level.RawIntervalCount = LevelIntervals.Num();
+	Level.RawIntervalOffset = bStoreRawIntervals ? Asset.ClipmapRawIntervals.Num() : 0;
+	Level.RawIntervalCount = bStoreRawIntervals ? LevelIntervals.Num() : 0;
 	Level.TileOffset = Asset.ClipmapTiles.Num();
 	Level.TileDataCount = Level.TileCount.X * Level.TileCount.Y;
 	Level.PageTableOffset = Asset.ClipmapPageTable.Num();
@@ -727,7 +728,10 @@ static bool AppendCompressedClipmapLevel(
 	Level.WorldToShadowRow2 = Asset.WorldToShadowRow2;
 	Level.WorldToShadowRow3 = Asset.WorldToShadowRow3;
 
-	Asset.ClipmapRawIntervals.Append(LevelIntervals);
+	if (bStoreRawIntervals)
+	{
+		Asset.ClipmapRawIntervals.Append(LevelIntervals);
+	}
 	Asset.ClipmapTiles.Reserve(Asset.ClipmapTiles.Num() + Level.TileDataCount);
 	Asset.ClipmapPageTable.Reserve(Asset.ClipmapPageTable.Num() + Level.TileDataCount);
 
@@ -986,6 +990,355 @@ static bool SaveShadowDataAsset(const FString& ObjectPath, UMHShadowDataAsset* A
 	SaveArgs.SaveFlags = SAVE_NoError;
 	return UPackage::SavePackage(Package, Asset, *PackageFilename, SaveArgs);
 }
+
+struct FMHDualClipmapManifestEntry
+{
+	int32 LevelIndex = INDEX_NONE;
+	FString File;
+};
+
+static bool ExtractJsonLineStringValue(const FString& Line, const TCHAR* Key, FString& OutValue)
+{
+	const int32 KeyPos = Line.Find(Key);
+	if (KeyPos == INDEX_NONE)
+	{
+		return false;
+	}
+	const int32 ColonPos = Line.Find(TEXT(":"), ESearchCase::IgnoreCase, ESearchDir::FromStart, KeyPos);
+	const int32 FirstQuote = ColonPos != INDEX_NONE ? Line.Find(TEXT("\""), ESearchCase::IgnoreCase, ESearchDir::FromStart, ColonPos + 1) : INDEX_NONE;
+	const int32 SecondQuote = FirstQuote != INDEX_NONE ? Line.Find(TEXT("\""), ESearchCase::IgnoreCase, ESearchDir::FromStart, FirstQuote + 1) : INDEX_NONE;
+	if (FirstQuote == INDEX_NONE || SecondQuote == INDEX_NONE)
+	{
+		return false;
+	}
+	OutValue = Line.Mid(FirstQuote + 1, SecondQuote - FirstQuote - 1);
+	return !OutValue.IsEmpty();
+}
+
+static bool ExtractJsonLineIntValue(const FString& Line, const TCHAR* Key, int32& OutValue)
+{
+	const int32 KeyPos = Line.Find(Key);
+	if (KeyPos == INDEX_NONE)
+	{
+		return false;
+	}
+	const int32 ColonPos = Line.Find(TEXT(":"), ESearchCase::IgnoreCase, ESearchDir::FromStart, KeyPos);
+	if (ColonPos == INDEX_NONE)
+	{
+		return false;
+	}
+	int32 EndPos = Line.Find(TEXT(","), ESearchCase::IgnoreCase, ESearchDir::FromStart, ColonPos + 1);
+	if (EndPos == INDEX_NONE)
+	{
+		EndPos = Line.Find(TEXT("}"), ESearchCase::IgnoreCase, ESearchDir::FromStart, ColonPos + 1);
+	}
+	if (EndPos == INDEX_NONE)
+	{
+		return false;
+	}
+	FString NumberText = Line.Mid(ColonPos + 1, EndPos - ColonPos - 1);
+	NumberText.TrimStartAndEndInline();
+	return LexTryParseString(OutValue, *NumberText);
+}
+
+static bool LoadLightmassDualClipmapManifest(const FString& ManifestPath, TArray<FMHDualClipmapManifestEntry>& OutEntries)
+{
+	FString ManifestText;
+	if (!FFileHelper::LoadFileToString(ManifestText, *ManifestPath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to read MH dual clipmap manifest: %s"), *ManifestPath);
+		return false;
+	}
+
+	TArray<FString> Lines;
+	ManifestText.ParseIntoArrayLines(Lines);
+	const FString ManifestDir = FPaths::GetPath(ManifestPath);
+	for (const FString& Line : Lines)
+	{
+		if (!Line.Contains(TEXT("\"File\"")))
+		{
+			continue;
+		}
+
+		FMHDualClipmapManifestEntry Entry;
+		if (!ExtractJsonLineIntValue(Line, TEXT("\"LevelIndex\""), Entry.LevelIndex)
+			|| !ExtractJsonLineStringValue(Line, TEXT("\"File\""), Entry.File))
+		{
+			UE_LOG(LogTemp, Error, TEXT("Invalid MH dual clipmap manifest level line: %s"), *Line);
+			return false;
+		}
+
+		if (FPaths::IsRelative(Entry.File))
+		{
+			Entry.File = FPaths::ConvertRelativePathToFull(FPaths::Combine(ManifestDir, Entry.File));
+		}
+		FPaths::NormalizeFilename(Entry.File);
+		OutEntries.Add(Entry);
+	}
+
+	OutEntries.Sort([](const FMHDualClipmapManifestEntry& A, const FMHDualClipmapManifestEntry& B)
+	{
+		return A.LevelIndex < B.LevelIndex;
+	});
+	return OutEntries.Num() > 0;
+}
+
+static void ConvertLightmassDualSamplesToIntervals(
+	const FMHDualShadowMapFileData& FileData,
+	const TArray<FMHDualShadowMapFileSample>& FileSamples,
+	TArray<FMHShadowDepthInterval>& OutIntervals,
+	TArray<uint8>* OutFlags,
+	int32& OutValidIntervalCount)
+{
+	const int32 ExpectedTexelCount = FileData.ShadowMapSizeX * FileData.ShadowMapSizeY;
+	OutIntervals.Empty(ExpectedTexelCount);
+	OutIntervals.AddDefaulted(ExpectedTexelCount);
+	if (OutFlags)
+	{
+		OutFlags->Empty(ExpectedTexelCount);
+		OutFlags->AddZeroed(ExpectedTexelCount);
+	}
+
+	OutValidIntervalCount = 0;
+	for (int32 Index = 0; Index < ExpectedTexelCount; ++Index)
+	{
+		const FMHDualShadowMapFileSample& FileSample = FileSamples[Index];
+		const bool bValid = (FileSample.Flags & MHDSF_Valid) != 0;
+		FMHShadowDepthInterval& Interval = OutIntervals[Index];
+		Interval.MinDepth = FileSample.FrontDepth.GetFloat();
+		Interval.MaxDepth = FileSample.BackDepth.GetFloat();
+		Interval.bValid = bValid;
+		if (OutFlags)
+		{
+			(*OutFlags)[Index] = FileSample.Flags;
+		}
+		OutValidIntervalCount += bValid ? 1 : 0;
+	}
+}
+
+static int32 ImportLightmassDualClipmapManifest(
+	const FString& Params,
+	const FString& ManifestPath)
+{
+	TArray<FMHDualClipmapManifestEntry> Entries;
+	if (!LoadLightmassDualClipmapManifest(ManifestPath, Entries))
+	{
+		UE_LOG(LogTemp, Error, TEXT("No MH dual clipmap levels found in manifest: %s"), *ManifestPath);
+		return 1;
+	}
+
+	FString OutputPath = TEXT("/Game/MHShadow/Baked/MHShadowData_LightmassDual_AutoClipmap");
+	ParseStringParam(Params, TEXT("Output="), OutputPath);
+	const FString OutputObjectPath = ToObjectPath(OutputPath);
+	const int32 ImportTileSize = FMath::Max(1, FMath::RoundToInt(ParseFloatParam(Params, TEXT("TileSize="), 128.0f)));
+	const bool bIncludeRawDebug = FMath::RoundToInt(ParseFloatParam(Params, TEXT("IncludeRawDebug="), 0.0f)) != 0;
+	if (!FMath::IsPowerOfTwo(ImportTileSize))
+	{
+		UE_LOG(LogTemp, Error, TEXT("LightmassDual clipmap import requires power-of-two TileSize, got %d."), ImportTileSize);
+		return 1;
+	}
+
+	const FString PackageName = FPackageName::ObjectPathToPackageName(OutputObjectPath);
+	const FString AssetName = GetAssetStemFromObjectPath(OutputObjectPath);
+	UPackage* Package = CreatePackage(*PackageName);
+	if (UObject* ExistingAsset = StaticFindObject(nullptr, Package, *AssetName))
+	{
+		ExistingAsset->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_ForceNoResetLoaders);
+	}
+	UMHShadowDataAsset* Asset = NewObject<UMHShadowDataAsset>(Package, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
+	Asset->BakeSource = EMHShadowBakeSource::LightmassDual;
+	Asset->ProjectionMapping = EMHShadowProjectionMapping::LightmassWorldToShadowMatrix;
+	Asset->TileSize = ImportTileSize;
+	Asset->DepthBias = ParseFloatParam(Params, TEXT("DepthBias="), 0.001f);
+	Asset->LightOrigin = FVector::ZeroVector;
+	Asset->LightXAxis = FVector::ForwardVector;
+	Asset->LightYAxis = FVector::RightVector;
+	Asset->LightZAxis = FVector::UpVector;
+	Asset->LightSpaceMin = FVector2D::ZeroVector;
+	Asset->LightSpaceMax = FVector2D(1.0, 1.0);
+	Asset->MinLightDepth = 0.0f;
+	Asset->MaxLightDepth = 1.0f;
+	Asset->RawIntervals.Reset();
+	Asset->RawIntervalFlags.Reset();
+	Asset->DebugIntervalPreview.Reset();
+	Asset->Intervals.Reset();
+	Asset->Nodes.Reset();
+	Asset->Tiles.Reset();
+	Asset->PageTable.Reset();
+	Asset->ClipmapLevels.Reset();
+	Asset->ClipmapRawIntervals.Reset();
+	Asset->ClipmapNodes.Reset();
+	Asset->ClipmapTiles.Reset();
+	Asset->ClipmapPageTable.Reset();
+
+	double TotalCompressionSeconds = 0.0;
+	int64 TotalCompressedBytes = 0;
+	int64 TotalRawTexels = 0;
+	int64 TotalValidTexels = 0;
+	FGuid FirstLightGuid;
+	bool bInitializedFromFirstLevel = false;
+
+	for (const FMHDualClipmapManifestEntry& Entry : Entries)
+	{
+		FGuid LightGuid;
+		FMHDualShadowMapFileData FileData;
+		TArray<FMHDualShadowMapFileSample> FileSamples;
+		TArray<FMHDualShadowMapFileDebugRay> DebugRays;
+		TArray<FMHDualShadowMapFileDebugHit> DebugHits;
+		if (!LoadLightmassDualFile(Entry.File, LightGuid, FileData, FileSamples, DebugRays, DebugHits))
+		{
+			return 1;
+		}
+
+		const int32 ExpectedTexelCount = FileData.ShadowMapSizeX * FileData.ShadowMapSizeY;
+		if (FileData.ShadowMapSizeX <= 0 || FileData.ShadowMapSizeY <= 0 || FileSamples.Num() != ExpectedTexelCount)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Invalid MH dual clipmap level %d dimensions: %dx%d samples=%d"),
+				Entry.LevelIndex,
+				FileData.ShadowMapSizeX,
+				FileData.ShadowMapSizeY,
+				FileSamples.Num());
+			return 1;
+		}
+		if ((FileData.ShadowMapSizeX % ImportTileSize) != 0 || (FileData.ShadowMapSizeY % ImportTileSize) != 0)
+		{
+			UE_LOG(LogTemp, Error, TEXT("MH dual clipmap level %d resolution %dx%d must be divisible by TileSize=%d."),
+				Entry.LevelIndex,
+				FileData.ShadowMapSizeX,
+				FileData.ShadowMapSizeY,
+				ImportTileSize);
+			return 1;
+		}
+
+		if (!bInitializedFromFirstLevel)
+		{
+			FirstLightGuid = LightGuid;
+			Asset->Resolution = FIntPoint(FileData.ShadowMapSizeX, FileData.ShadowMapSizeY);
+			Asset->TileCount = FIntPoint(FileData.ShadowMapSizeX / ImportTileSize, FileData.ShadowMapSizeY / ImportTileSize);
+			bInitializedFromFirstLevel = true;
+		}
+		else if (LightGuid != FirstLightGuid)
+		{
+			UE_LOG(LogTemp, Error, TEXT("MH dual clipmap manifest mixes light GUIDs: first=%s level=%d file=%s guid=%s"),
+				*FirstLightGuid.ToString(EGuidFormats::DigitsWithHyphens),
+				Entry.LevelIndex,
+				*Entry.File,
+				*LightGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			return 1;
+		}
+
+		Asset->WorldToShadowRow0 = FVector4(FileData.WorldToLight.M[0][0], FileData.WorldToLight.M[0][1], FileData.WorldToLight.M[0][2], FileData.WorldToLight.M[0][3]);
+		Asset->WorldToShadowRow1 = FVector4(FileData.WorldToLight.M[1][0], FileData.WorldToLight.M[1][1], FileData.WorldToLight.M[1][2], FileData.WorldToLight.M[1][3]);
+		Asset->WorldToShadowRow2 = FVector4(FileData.WorldToLight.M[2][0], FileData.WorldToLight.M[2][1], FileData.WorldToLight.M[2][2], FileData.WorldToLight.M[2][3]);
+		Asset->WorldToShadowRow3 = FVector4(FileData.WorldToLight.M[3][0], FileData.WorldToLight.M[3][1], FileData.WorldToLight.M[3][2], FileData.WorldToLight.M[3][3]);
+
+		TArray<FMHShadowDepthInterval> LevelIntervals;
+		int32 LevelValidIntervals = 0;
+		ConvertLightmassDualSamplesToIntervals(FileData, FileSamples, LevelIntervals, nullptr, LevelValidIntervals);
+		if (!AppendCompressedClipmapLevel(
+			*Asset,
+			LevelIntervals,
+			FIntPoint(FileData.ShadowMapSizeX, FileData.ShadowMapSizeY),
+			Entry.LevelIndex,
+			ImportTileSize,
+			FVector2D(FileData.TexelWorldSizeX, FileData.TexelWorldSizeY),
+			TotalCompressionSeconds,
+			TotalCompressedBytes,
+			bIncludeRawDebug))
+		{
+			return 1;
+		}
+
+		FMHShadowClipmapLevel& AddedLevel = Asset->ClipmapLevels.Last();
+		AddedLevel.WorldToShadowRow0 = Asset->WorldToShadowRow0;
+		AddedLevel.WorldToShadowRow1 = Asset->WorldToShadowRow1;
+		AddedLevel.WorldToShadowRow2 = Asset->WorldToShadowRow2;
+		AddedLevel.WorldToShadowRow3 = Asset->WorldToShadowRow3;
+
+		TotalRawTexels += ExpectedTexelCount;
+		TotalValidTexels += LevelValidIntervals;
+		UE_LOG(LogTemp, Display, TEXT("Imported MH dual clipmap manifest level %d from %s resolution=%dx%d texelWorld=%.4f/%.4f valid=%d nodesSoFar=%d"),
+			Entry.LevelIndex,
+			*Entry.File,
+			FileData.ShadowMapSizeX,
+			FileData.ShadowMapSizeY,
+			FileData.TexelWorldSizeX,
+			FileData.TexelWorldSizeY,
+			LevelValidIntervals,
+			Asset->ClipmapNodes.Num());
+	}
+
+	if (Asset->ClipmapLevels.Num() > 0)
+	{
+		const FMHShadowClipmapLevel& FirstLevel = Asset->ClipmapLevels[0];
+		Asset->WorldToShadowRow0 = FirstLevel.WorldToShadowRow0;
+		Asset->WorldToShadowRow1 = FirstLevel.WorldToShadowRow1;
+		Asset->WorldToShadowRow2 = FirstLevel.WorldToShadowRow2;
+		Asset->WorldToShadowRow3 = FirstLevel.WorldToShadowRow3;
+	}
+
+	Asset->Stats.RawTexelCount = TotalRawTexels;
+	Asset->Stats.ValidTexelCount = TotalValidTexels;
+	Asset->Stats.NodeCount = Asset->ClipmapNodes.Num();
+	Asset->Stats.IntervalCount = Asset->Intervals.Num();
+	Asset->Stats.RawBytes = TotalRawTexels * static_cast<int64>(sizeof(float) * 2);
+	Asset->Stats.CompressedBytes =
+		TotalCompressedBytes
+		+ static_cast<int64>(Asset->ClipmapTiles.Num()) * static_cast<int64>(sizeof(FMHShadowTile))
+		+ static_cast<int64>(Asset->ClipmapPageTable.Num()) * static_cast<int64>(sizeof(int32))
+		+ static_cast<int64>(Asset->ClipmapLevels.Num()) * static_cast<int64>(sizeof(FMHShadowClipmapLevel));
+	Asset->Stats.CompressionRatio = Asset->Stats.RawBytes > 0
+		? static_cast<float>(static_cast<double>(Asset->Stats.CompressedBytes) / static_cast<double>(Asset->Stats.RawBytes))
+		: 1.0f;
+	Asset->Stats.BakeSeconds = TotalCompressionSeconds;
+
+	Package->MarkPackageDirty();
+	FAssetRegistryModule::AssetCreated(Asset);
+	if (!SaveShadowDataAsset(OutputObjectPath, Asset))
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to save MH dual clipmap asset: %s"), *OutputObjectPath);
+		return 1;
+	}
+
+	const FString StatsDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("MHShadow"), TEXT("RealClipmap"));
+	IFileManager::Get().MakeDirectory(*StatsDir, true);
+	FString Csv = TEXT("Level,File,ResolutionX,ResolutionY,TileSize,TileCountX,TileCountY,TexelWorldSizeX,TexelWorldSizeY,RawIntervals,Tiles,Nodes,WorldToShadowRow0,WorldToShadowRow1,WorldToShadowRow2,WorldToShadowRow3\n");
+	for (int32 LevelArrayIndex = 0; LevelArrayIndex < Asset->ClipmapLevels.Num(); ++LevelArrayIndex)
+	{
+		const FMHShadowClipmapLevel& Level = Asset->ClipmapLevels[LevelArrayIndex];
+		Csv += FString::Printf(
+			TEXT("%d,%s,%d,%d,%d,%d,%d,%.6f,%.6f,%d,%d,%d,\"%s\",\"%s\",\"%s\",\"%s\"\n"),
+			Level.LevelIndex,
+			Entries.IsValidIndex(LevelArrayIndex) ? *Entries[LevelArrayIndex].File : TEXT(""),
+			Level.Resolution.X,
+			Level.Resolution.Y,
+			Level.TileSize,
+			Level.TileCount.X,
+			Level.TileCount.Y,
+			Level.TexelWorldSize.X,
+			Level.TexelWorldSize.Y,
+			Level.RawIntervalCount,
+			Level.TileDataCount,
+			Level.NodeCount,
+			*Level.WorldToShadowRow0.ToString(),
+			*Level.WorldToShadowRow1.ToString(),
+			*Level.WorldToShadowRow2.ToString(),
+			*Level.WorldToShadowRow3.ToString());
+	}
+	FFileHelper::SaveStringToFile(Csv, *FPaths::Combine(StatsDir, AssetName + TEXT("_ClipmapLevelSummary.csv")));
+
+	UE_LOG(LogTemp, Display, TEXT("Imported MH dual clipmap manifest: %s Output=%s Levels=%d Light=%s Raw=%lld StoredRaw=%d Tiles=%d Nodes=%d Ratio=%.6f"),
+		*ManifestPath,
+		*OutputObjectPath,
+		Asset->ClipmapLevels.Num(),
+		*FirstLightGuid.ToString(EGuidFormats::DigitsWithHyphens),
+		TotalRawTexels,
+		Asset->ClipmapRawIntervals.Num(),
+		Asset->ClipmapTiles.Num(),
+		Asset->ClipmapNodes.Num(),
+		Asset->Stats.CompressionRatio);
+	return 0;
+}
 }
 
 UMHShadowImportLightmassDualCommandlet::UMHShadowImportLightmassDualCommandlet()
@@ -996,8 +1349,19 @@ UMHShadowImportLightmassDualCommandlet::UMHShadowImportLightmassDualCommandlet()
 	LogToConsole = true;
 }
 
-int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
+int32 RunMHShadowImportLightmassDualCommandlet(const FString& Params)
 {
+	FString ManifestPath;
+	if (ParseStringParam(Params, TEXT("Manifest="), ManifestPath))
+	{
+		if (FPaths::IsRelative(ManifestPath))
+		{
+			ManifestPath = FPaths::ConvertRelativePathToFull(ManifestPath);
+		}
+		FPaths::NormalizeFilename(ManifestPath);
+		return ImportLightmassDualClipmapManifest(Params, ManifestPath);
+	}
+
 	FString FilePath;
 	if (!ParseStringParam(Params, TEXT("File="), FilePath) && !FindLatestLightmassDualFile(FilePath))
 	{
@@ -1292,4 +1656,9 @@ int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
 		DebugRays.Num(),
 		DebugHits.Num());
 	return 0;
+}
+
+int32 UMHShadowImportLightmassDualCommandlet::Main(const FString& Params)
+{
+	return RunMHShadowImportLightmassDualCommandlet(Params);
 }
