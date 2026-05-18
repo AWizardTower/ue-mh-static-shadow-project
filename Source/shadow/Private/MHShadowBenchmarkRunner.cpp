@@ -1620,12 +1620,15 @@ void FMHShadowBenchmarkRunner::BuildSoftShadowRegressionPlan()
 			TEXT("r.Shadow.MHStatic.Restored.PCFKernel 3"),
 			TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy 1"),
 			TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels 1"),
+			TEXT("r.Shadow.MHStatic.Restored.Soft.Mode 1"),
 			TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerSamples 8"),
 			TEXT("r.Shadow.MHStatic.Restored.Soft.FilterSamples 16"),
 			TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerRadiusTexels 4"),
 			TEXT("r.Shadow.MHStatic.Restored.Soft.MinRadiusTexels 1"),
 			TEXT("r.Shadow.MHStatic.Restored.Soft.MaxRadiusTexels 6"),
-			TEXT("r.Shadow.MHStatic.Restored.Soft.PenumbraScale 0.05")
+			TEXT("r.Shadow.MHStatic.Restored.Soft.PenumbraScale 0.05"),
+			TEXT("r.Shadow.MHStatic.Restored.Soft.TransitionScale 4096"),
+			TEXT("r.Shadow.MHStatic.Restored.Soft.SourceAngleScale 1")
 		});
 		if (FilterMode != 0)
 		{
@@ -1643,16 +1646,20 @@ void FMHShadowBenchmarkRunner::BuildSoftShadowRegressionPlan()
 	FCaptureSpec Hard = MakeSoftRoute(TEXT("Hard_FixedBias_0p01"), 0, 0, 20, false, TEXT("Manual fixed 0.01 bias hard-shadow baseline for contact-hardening comparison."));
 	Hard.bAtlasBaseline = true;
 	Captures.Add(Hard);
-	Captures.Add(MakeSoftRoute(TEXT("PCF3_UEReceiverPlane"), 2, 1, 24, false, TEXT("Stable same-resolved-level 3x3 PCF baseline from Stage 5.2.")));
-	Captures.Add(MakeSoftRoute(TEXT("Soft_Blocker8_Filter16"), 2, 2, 28, false, TEXT("SMRT-like contact-hardening route: 8 blocker taps and 16 soft PCF taps.")));
+	Captures.Add(MakeSoftRoute(TEXT("PCF3_UECSMCompatible"), 3, 1, 24, false, TEXT("Stable same-resolved-level 3x3 PCF baseline using UE CSM-compatible bias.")));
+	Captures.Add(MakeSoftRoute(TEXT("Soft_UEPCSS_Blocker8_Filter16"), 3, 2, 28, false, TEXT("UE PCSS-compatible contact-hardening route: 8 blocker taps and 16 soft PCF taps.")));
+	FCaptureSpec LegacySoft = MakeSoftRoute(TEXT("Soft_LegacyContactHardening"), 2, 2, 28, false, TEXT("Legacy contact-hardening route retained as a visual and metric comparison."));
+	UpsertCommand(LegacySoft.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.Mode"), TEXT("0"));
+	Captures.Add(LegacySoft);
 
-	FCaptureSpec SoftRepeat = MakeSoftRoute(TEXT("Soft_Blocker8_Filter16_Repeat"), 2, 2, 28, true, TEXT("Repeat capture for contact-hardening temporal stability."));
-	SoftRepeat.StabilityBaselineName = TEXT("Soft_Blocker8_Filter16");
+	FCaptureSpec SoftRepeat = MakeSoftRoute(TEXT("Soft_UEPCSS_Blocker8_Filter16_Repeat"), 3, 2, 28, true, TEXT("Repeat capture for UE PCSS-compatible contact-hardening temporal stability."));
+	SoftRepeat.StabilityBaselineName = TEXT("Soft_UEPCSS_Blocker8_Filter16");
 	Captures.Add(SoftRepeat);
 
-	PairwiseSpecs.Add({ TEXT("PCF3_UEReceiverPlane"), TEXT("Hard_FixedBias_0p01") });
-	PairwiseSpecs.Add({ TEXT("Soft_Blocker8_Filter16"), TEXT("Hard_FixedBias_0p01") });
-	PairwiseSpecs.Add({ TEXT("Soft_Blocker8_Filter16"), TEXT("PCF3_UEReceiverPlane") });
+	PairwiseSpecs.Add({ TEXT("PCF3_UECSMCompatible"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("Soft_UEPCSS_Blocker8_Filter16"), TEXT("Hard_FixedBias_0p01") });
+	PairwiseSpecs.Add({ TEXT("Soft_UEPCSS_Blocker8_Filter16"), TEXT("PCF3_UECSMCompatible") });
+	PairwiseSpecs.Add({ TEXT("Soft_UEPCSS_Blocker8_Filter16"), TEXT("Soft_LegacyContactHardening") });
 
 	for (int32 CaptureIndex = 0; CaptureIndex < Captures.Num(); ++CaptureIndex)
 	{
@@ -2731,56 +2738,61 @@ void FMHShadowBenchmarkRunner::WriteOutputs() const
 	FFileHelper::SaveStringArrayToFile(SummaryLines, *FPaths::Combine(OutputDir, TEXT("BenchmarkSummary.csv")));
 
 	TArray<FString> RouteSummaryLines;
-	RouteSummaryLines.Add(TEXT("Source,SettleFrames,ResetCacheAtRouteStart,CompareToAtlas,StabilityRepeat,CVarSource,Debug,RestoredEnablePCF,RestoredDepthBiasScale,RestoredDepthBiasAdd,RestoredBiasMode,RestoredBiasWorldUnits,RestoredSlopeBiasScale,RestoredSlopeBiasClamp,RestoredForceScreenSlope,RestoredFilterBiasScale,RestoredFilterMode,RestoredPCFKernel,RestoredPCFSamplePolicy,RestoredPCFRadiusTexels,SoftBlockerSamples,SoftFilterSamples,SoftBlockerRadiusTexels,SoftMinRadiusTexels,SoftMaxRadiusTexels,SoftPenumbraScale,CachePagesX,CachePagesY,MaxUploads,CachePriorityMode,CacheLevelPriorityScale,CacheResidencyBoost,CacheEvictRequested,CacheEvictHysteresis,CachePrefetchRadius,CachePrefetchBudget,LevelCount,Level0Distance,DistanceScale,FineLevelBias,FallbackMaxCoarserLevels,SingleLevelUseBaseData,CellDisableModulo,CellDisableRemainder,Commands,Notes"));
+	RouteSummaryLines.Add(TEXT("Source,SettleFrames,ResetCacheAtRouteStart,CompareToAtlas,StabilityRepeat,CVarSource,Debug,RestoredEnablePCF,RestoredDepthBiasScale,RestoredDepthBiasAdd,RestoredBiasMode,RestoredBiasWorldUnits,RestoredSlopeBiasScale,RestoredSlopeBiasClamp,RestoredForceScreenSlope,RestoredFilterBiasScale,RestoredFilterMode,RestoredPCFKernel,RestoredPCFSamplePolicy,RestoredPCFRadiusTexels,SoftMode,SoftBlockerSamples,SoftFilterSamples,SoftBlockerRadiusTexels,SoftMinRadiusTexels,SoftMaxRadiusTexels,SoftPenumbraScale,SoftTransitionScale,SoftSourceAngleScale,CachePagesX,CachePagesY,MaxUploads,CachePriorityMode,CacheLevelPriorityScale,CacheResidencyBoost,CacheEvictRequested,CacheEvictHysteresis,CachePrefetchRadius,CachePrefetchBudget,LevelCount,Level0Distance,DistanceScale,FineLevelBias,FallbackMaxCoarserLevels,SingleLevelUseBaseData,CellDisableModulo,CellDisableRemainder,Commands,Notes"));
 	for (const FCaptureSpec& Capture : Captures)
 	{
-		RouteSummaryLines.Add(FString::Printf(TEXT("%s,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d,%s,%s"),
-			*CsvEscape(Capture.Name),
-			Capture.SettleFrames,
-			Capture.bResetCacheAtRouteStart ? 1 : 0,
-			Capture.bCompareToAtlas ? 1 : 0,
-			Capture.bClipmapStabilityRepeat ? 1 : 0,
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Source"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Debug"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.EnablePCF"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.BiasMode"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.FilterMode"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFKernel"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerSamples"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.FilterSamples"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerRadiusTexels"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.MinRadiusTexels"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.MaxRadiusTexels"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.PenumbraScale"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PriorityMode"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.LevelPriorityScale"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.ResidencyBoost"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.EvictRequested"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.EvictHysteresis"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PrefetchRadius"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PrefetchBudget"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.LevelCount"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.FineLevelBias"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.FallbackMaxCoarserLevels"))),
-			*CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.SingleLevelUseBaseData"))),
-			Capture.CellDisableModulo,
-			Capture.CellDisableRemainder,
-			*CsvEscape(JoinCommandsForCsv(Capture.Commands)),
-			*CsvEscape(Capture.Notes)));
+		TArray<FString> Fields;
+		Fields.Reserve(49);
+		Fields.Add(CsvEscape(Capture.Name));
+		Fields.Add(FString::FromInt(Capture.SettleFrames));
+		Fields.Add(FString::FromInt(Capture.bResetCacheAtRouteStart ? 1 : 0));
+		Fields.Add(FString::FromInt(Capture.bCompareToAtlas ? 1 : 0));
+		Fields.Add(FString::FromInt(Capture.bClipmapStabilityRepeat ? 1 : 0));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Source"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Debug"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.EnablePCF"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.BiasMode"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.BiasWorldUnits"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.SlopeBiasScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.SlopeBiasClamp"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.ForceScreenSlope"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.FilterBiasScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.FilterMode"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFKernel"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFSamplePolicy"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.PCFRadiusTexels"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.Mode"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerSamples"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.FilterSamples"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerRadiusTexels"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.MinRadiusTexels"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.MaxRadiusTexels"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.PenumbraScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.TransitionScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Restored.Soft.SourceAngleScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesX"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PhysicalPagesY"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.MaxPageUploadsPerFrame"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PriorityMode"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.LevelPriorityScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.ResidencyBoost"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.EvictRequested"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.EvictHysteresis"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PrefetchRadius"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Cache.PrefetchBudget"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.LevelCount"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.Level0Distance"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.DistanceScale"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.FineLevelBias"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.FallbackMaxCoarserLevels"))));
+		Fields.Add(CsvEscape(FindCommandValue(Capture.Commands, TEXT("r.Shadow.MHStatic.Clipmap.SingleLevelUseBaseData"))));
+		Fields.Add(FString::FromInt(Capture.CellDisableModulo));
+		Fields.Add(FString::FromInt(Capture.CellDisableRemainder));
+		Fields.Add(CsvEscape(JoinCommandsForCsv(Capture.Commands)));
+		Fields.Add(CsvEscape(Capture.Notes));
+		RouteSummaryLines.Add(FString::Join(Fields, TEXT(",")));
 	}
 	FFileHelper::SaveStringArrayToFile(RouteSummaryLines, *FPaths::Combine(OutputDir, TEXT("BenchmarkRouteSummary.csv")));
 

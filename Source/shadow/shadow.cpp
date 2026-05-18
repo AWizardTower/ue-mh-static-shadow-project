@@ -381,12 +381,15 @@ private:
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasScale"), 0.0f);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.DepthBiasAdd"), 0.0f);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.UEBiasDistribution"), 1.0f);
+		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.Soft.Mode"), 1);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerSamples"), 8);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Restored.Soft.FilterSamples"), 16);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.Soft.BlockerRadiusTexels"), 4.0f);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.Soft.MinRadiusTexels"), 1.0f);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.Soft.MaxRadiusTexels"), 6.0f);
 		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.Soft.PenumbraScale"), 0.05f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.Soft.TransitionScale"), 4096.0f);
+		SetMHShadowCVarFloat(TEXT("r.Shadow.MHStatic.Restored.Soft.SourceAngleScale"), 1.0f);
 		SetMHShadowCVarInt(TEXT("r.Shadow.MHStatic.Cache.Reset"), 1);
 		UE_LOG(LogTemp, Display, TEXT("Applied MHShadow.Preset.SoftClipmap16."));
 	}
